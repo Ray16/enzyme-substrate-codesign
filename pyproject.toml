@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "enzyme-substrate-codesign"
-version = "0.1.0"
-description = "Standalone saturation mutagenesis and partial diffusion enzyme design workflows with Boltz-2 co-folding and catalytic attack-geometry evaluation."
+version = "0.2.0"
+description = "Standalone saturation mutagenesis, partial diffusion, Boltz-2 co-folding, catalytic attack-geometry, and active-site contact analysis workflows."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
@@ -17,21 +17,35 @@ dependencies = [
 [project.optional-dependencies]
 boltz = [
     "boltz>=2.0",
+    "requests>=2.28",
+]
+viz = [
+    "matplotlib>=3.7",
+    "Pillow>=9.5",
 ]
 cif-zst = [
     "zstandard>=0.21",
 ]
 dev = [
     "pytest>=7.0",
+    "matplotlib>=3.7",
 ]
 
 [project.scripts]
 saturation-mutagenesis = "saturation_mutagenesis.cli:main"
 partial-diffusion = "partial_diffusion.cli:main"
+boltz-cofold = "boltz_cofold.cli:main"
+contact-analysis = "contact_analysis.cli:main"
 enzyme-geometry = "attack_geometry.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["attack_geometry*", "saturation_mutagenesis*", "partial_diffusion*"]
+include = [
+    "attack_geometry*",
+    "boltz_cofold*",
+    "contact_analysis*",
+    "partial_diffusion*",
+    "saturation_mutagenesis*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

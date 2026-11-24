@@ -1,0 +1,10 @@
+[
+  {
+    "group_id": "attack_carboxylate",
+    "chain": "D",
+    "resi": "1",
+    "acceptors": ["O1", "O2"],
+    "formal_charge": -1,
+    "provenance": "validated_substrate_molecular_graph"
+  }
+]

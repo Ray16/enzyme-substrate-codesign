@@ -230,7 +230,8 @@ def evaluate_saturation_campaign(
                         **conf,
                     }
                 )
-            pose_arrays[v.id] = np.array([[g.distance_A, g.angle_deg] for g in geoms], dtype=float)
+            if all(g.angle_deg is not None for g in geoms):
+                pose_arrays[v.id] = np.array([[g.distance_A, float(g.angle_deg)] for g in geoms], dtype=float)
             ens = summarize_ensemble(geoms).to_dict()
             conf_summary = {
                 f"{k}_mean": round(statistics.fmean(vals), 5)

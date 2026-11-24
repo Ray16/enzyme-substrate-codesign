@@ -1,119 +1,137 @@
-"""Catalytic attack-geometry evaluation, ensemble aggregation, and motif alignment.
+"""General catalytic geometry evaluation, ensemble aggregation, and symmetry-aware Kabsch RMSD.
 
-Preserves the exact nucleophile-electrophile distance, attack angle/trajectory,
-proximity-weighted ensemble summarization, bootstrap WT comparison, Kabsch
-superposition with ASP OD1/OD2 symmetry resolution, and protein-ligand steric
-clash metrics from ``enzyme_design_agent``.
+Supports arbitrary user-configured atom selectors for distance (and optional
+3-atom angle) evaluation, standard & proximity-weighted ensemble summaries,
+Kabsch superposition with general chemically equivalent sidechain atom pairs
+(ASP, GLU, PHE, TYR, ARG, VAL, LEU, or custom pairs), and configurable steric
+clash checks.
 """
 from __future__ import annotations
 
 import itertools
 import math
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
 from .config import GeometryConfig, ThresholdConfig
 from .structure import Structure, load_structure, select_atoms
 
+#: Standard chemically equivalent sidechain heavy-atom pairs for symmetry-aware RMSD.
+STANDARD_SYMMETRY_PAIRS: dict[str, tuple[tuple[str, str], ...]] = {
+    "ASP": (("OD1", "OD2"),),
+    "GLU": (("OE1", "OE2"),),
+    "ARG": (("NH1", "NH2"),),
+    "PHE": (("CD1", "CD2"), ("CE1", "CE2")),
+    "TYR": (("CD1", "CD2"), ("CE1", "CE2")),
+    "VAL": (("CG1", "CG2"),),
+    "LEU": (("CD1", "CD2"),),
+}
+
 
 @dataclass(frozen=True)
 class AttackGeometry:
-    """Per-pose nucleophile-electrophile attack geometry."""
+    """Per-pose catalytic distance and optional 3-atom angle."""
 
     distance_A: float
-    angle_deg: float
+    angle_deg: float | None
     attack_chain: str
     attack_resnum: int
     attack_atom: str
     center_chain: str
     center_atom: str
-    leaving_chain: str
-    leaving_atom: str
+    leaving_chain: str | None
+    leaving_atom: str | None
     n_candidates: int
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "distance_A": round(self.distance_A, 4),
-            "angle_deg": round(self.angle_deg, 3),
+            "angle_deg": round(self.angle_deg, 3) if self.angle_deg is not None else None,
             "attack_chain": self.attack_chain,
             "attack_resnum": self.attack_resnum,
             "attack_atom": self.attack_atom,
             "center_chain": self.center_chain,
             "center_atom": self.center_atom,
-            "leaving_chain": self.leaving_chain,
-            "leaving_atom": self.leaving_atom,
             "n_candidates": self.n_candidates,
         }
+        if self.leaving_atom is not None:
+            out["leaving_chain"] = self.leaving_chain
+            out["leaving_atom"] = self.leaving_atom
+        return out
 
 
 @dataclass(frozen=True)
 class EnsembleGeometry:
-    """Proximity-weighted ensemble attack geometry summary."""
+    """Ensemble summary of per-pose distances and (optional) angles."""
 
     n_poses: int
-    weighted_angle_deg: float
-    harmonic_distance_A: float
     mean_distance_A: float
     median_distance_A: float
-    mean_angle_deg: float
-    median_angle_deg: float
+    harmonic_distance_A: float
+    mean_angle_deg: float | None = None
+    median_angle_deg: float | None = None
+    weighted_angle_deg: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "n_poses": self.n_poses,
-            "weighted_angle_deg": round(self.weighted_angle_deg, 3),
-            "harmonic_distance_A": round(self.harmonic_distance_A, 4),
             "mean_distance_A": round(self.mean_distance_A, 4),
             "median_distance_A": round(self.median_distance_A, 4),
-            "mean_angle_deg": round(self.mean_angle_deg, 3),
-            "median_angle_deg": round(self.median_angle_deg, 3),
+            "harmonic_distance_A": round(self.harmonic_distance_A, 4),
         }
+        if self.mean_angle_deg is not None:
+            out["mean_angle_deg"] = round(self.mean_angle_deg, 3)
+            out["median_angle_deg"] = round(self.median_angle_deg, 3)
+            out["weighted_angle_deg"] = round(self.weighted_angle_deg, 3)
+        return out
 
 
 def evaluate_attack_geometry(
     structure: str | Structure,
     config: GeometryConfig,
 ) -> AttackGeometry:
-    """Compute nucleophile-electrophile distance and attack angle (degrees).
-
-    The attack angle is the angle ``donor_best -- electrophile -- leaving``,
-    where ``donor_best`` is the atom in ``config.donor`` closest to
-    ``config.electrophile`` (ties broken deterministically by atom order).
-    """
+    """Compute distance between nearest ``donor`` atom and ``electrophile``, plus optional angle."""
     st = load_structure(structure) if not isinstance(structure, Structure) else structure
     donors = select_atoms(st, config.donor)
     centers = select_atoms(st, config.electrophile)
-    leavings = select_atoms(st, config.leaving)
-    if len(centers) != 1 or len(leavings) != 1:
+    if len(centers) != 1:
         raise ValueError(
-            f"{st.path}: electrophile ({len(centers)}) and leaving ({len(leavings)}) "
-            "selectors must each identify exactly one atom."
+            f"{st.path}: electrophile/center selector matched {len(centers)} atoms; expected 1."
         )
 
     center = centers[0]
-    leaving = leavings[0]
     donor_coords = np.asarray([a.xyz for a in donors], dtype=float)
-    if not (
-        np.isfinite(donor_coords).all()
-        and np.isfinite(center.xyz).all()
-        and np.isfinite(leaving.xyz).all()
-    ):
-        raise ValueError(f"{st.path}: non-finite coordinates in reactive atoms")
+    if not (np.isfinite(donor_coords).all() and np.isfinite(center.xyz).all()):
+        raise ValueError(f"{st.path}: non-finite coordinates in selected atoms")
 
     distances = np.linalg.norm(donor_coords - center.xyz, axis=1)
     best_idx = int(np.argmin(distances))
     best_donor = donors[best_idx]
     d = float(distances[best_idx])
 
-    u = donor_coords[best_idx] - center.xyz
-    v = leaving.xyz - center.xyz
-    denom = float(np.linalg.norm(u) * np.linalg.norm(v))
-    if denom <= 0.0:
-        raise ValueError(f"{st.path}: degenerate reactive geometry (zero vector norm)")
-    cos_theta = float(np.clip(np.dot(u, v) / denom, -1.0, 1.0))
-    angle = math.degrees(math.acos(cos_theta))
+    angle: float | None = None
+    leaving_chain: str | None = None
+    leaving_atom: str | None = None
+    if config.leaving is not None:
+        leavings = select_atoms(st, config.leaving)
+        if len(leavings) != 1:
+            raise ValueError(
+                f"{st.path}: leaving/angle_reference selector matched {len(leavings)} atoms; expected 1."
+            )
+        leaving = leavings[0]
+        if not np.isfinite(leaving.xyz).all():
+            raise ValueError(f"{st.path}: non-finite coordinates in angle reference atom")
+        u = donor_coords[best_idx] - center.xyz
+        v = leaving.xyz - center.xyz
+        denom = float(np.linalg.norm(u) * np.linalg.norm(v))
+        if denom <= 0.0:
+            raise ValueError(f"{st.path}: degenerate geometry (zero vector norm)")
+        cos_theta = float(np.clip(np.dot(u, v) / denom, -1.0, 1.0))
+        angle = math.degrees(math.acos(cos_theta))
+        leaving_chain = leaving.chain
+        leaving_atom = leaving.name
 
     return AttackGeometry(
         distance_A=d,
@@ -123,8 +141,8 @@ def evaluate_attack_geometry(
         attack_atom=best_donor.name,
         center_chain=center.chain,
         center_atom=center.name,
-        leaving_chain=leaving.chain,
-        leaving_atom=leaving.name,
+        leaving_chain=leaving_chain,
+        leaving_atom=leaving_atom,
         n_candidates=len(donors),
     )
 
@@ -132,10 +150,8 @@ def evaluate_attack_geometry(
 def proximity_weighted_angle_and_distance(poses: np.ndarray | Sequence[Sequence[float]]) -> np.ndarray:
     """Return ``(..., 2)`` array of ``(weighted_angle_deg, harmonic_distance_A)``.
 
-    Input ``poses`` has shape ``(..., n_poses, 2)`` where the final axis is
-    ``(distance_A, angle_deg)``. Proximity weight is ``w_i = 1 / d_i``:
-    - ``weighted_angle = sum(angle_i / d_i) / sum(1 / d_i)``
-    - ``harmonic_distance = N / sum(1 / d_i)``
+    Optional inverse-distance weighted summary where ``poses[..., 0]`` is
+    distance (Å) and ``poses[..., 1]`` is angle (degrees).
     """
     x = np.asarray(poses, dtype=float)
     if x.ndim < 2 or x.shape[-1] != 2 or x.shape[-2] == 0:
@@ -151,19 +167,31 @@ def proximity_weighted_angle_and_distance(poses: np.ndarray | Sequence[Sequence[
 
 
 def summarize_ensemble(geometries: Sequence[AttackGeometry]) -> EnsembleGeometry:
-    """Aggregate per-pose attack geometries into proximity-weighted ensemble metrics."""
+    """Aggregate per-pose geometries into standard and inverse-distance ensemble statistics."""
     if not geometries:
         raise ValueError("Cannot summarize an empty pose ensemble")
-    arr = np.array([[g.distance_A, g.angle_deg] for g in geometries], dtype=float)
-    weighted = proximity_weighted_angle_and_distance(arr)
+    dists = np.array([g.distance_A for g in geometries], dtype=float)
+    h_dist = float(len(dists) / np.sum(1.0 / dists))
+
+    if all(g.angle_deg is not None for g in geometries):
+        angles = np.array([float(g.angle_deg) for g in geometries], dtype=float)
+        arr = np.column_stack([dists, angles])
+        weighted = proximity_weighted_angle_and_distance(arr)
+        return EnsembleGeometry(
+            n_poses=len(geometries),
+            mean_distance_A=float(np.mean(dists)),
+            median_distance_A=float(np.median(dists)),
+            harmonic_distance_A=h_dist,
+            mean_angle_deg=float(np.mean(angles)),
+            median_angle_deg=float(np.median(angles)),
+            weighted_angle_deg=float(weighted[0]),
+        )
+
     return EnsembleGeometry(
         n_poses=len(geometries),
-        weighted_angle_deg=float(weighted[0]),
-        harmonic_distance_A=float(weighted[1]),
-        mean_distance_A=float(np.mean(arr[:, 0])),
-        median_distance_A=float(np.median(arr[:, 0])),
-        mean_angle_deg=float(np.mean(arr[:, 1])),
-        median_angle_deg=float(np.median(arr[:, 1])),
+        mean_distance_A=float(np.mean(dists)),
+        median_distance_A=float(np.median(dists)),
+        harmonic_distance_A=h_dist,
     )
 
 
@@ -226,32 +254,44 @@ def symmetry_rmsd(
     y: np.ndarray,
     descriptors: Sequence[tuple[int, str, str]],
     transform: tuple[np.ndarray, np.ndarray] | None = None,
+    equivalent_pairs: Mapping[str, Sequence[tuple[str, str]]] = STANDARD_SYMMETRY_PAIRS,
 ) -> dict[str, Any]:
-    """Aligned RMSD resolving chemically equivalent ASP OD1/OD2 permutations.
+    """Aligned RMSD resolving chemically equivalent sidechain atom permutations.
 
     ``descriptors`` is a sequence of ``(position, resname, atom_name)`` tuples.
-    When ``transform`` is provided (e.g., global backbone Kabsch fit), applies
-    that transform without re-fitting the site.
+    By default resolves all standard symmetric sidechain pairs (ASP, GLU, ARG,
+    PHE, TYR, VAL, LEU); pass ``equivalent_pairs={}`` to disable symmetry swaps
+    or supply custom residue->pair mappings.
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
-    pairs: list[tuple[int, int]] = []
+
+    # Group coupled flips per residue (e.g., PHE/TYR flip CD1<->CD2 and CE1<->CE2 together)
+    swap_groups: list[list[tuple[int, int]]] = []
     for pos in sorted({d[0] for d in descriptors}):
-        names = {
-            name: i
-            for i, (p, residue, name) in enumerate(descriptors)
-            if p == pos and residue == "ASP"
-        }
-        if {"OD1", "OD2"} <= names.keys():
-            pairs.append((names["OD1"], names["OD2"]))
+        resnames = {r for p, r, _ in descriptors if p == pos}
+        for resname in sorted(resnames):
+            atom_idx = {
+                name: i
+                for i, (p, r, name) in enumerate(descriptors)
+                if p == pos and r == resname
+            }
+            pairs_for_res = [
+                (atom_idx[a1], atom_idx[a2])
+                for a1, a2 in equivalent_pairs.get(resname, ())
+                if a1 in atom_idx and a2 in atom_idx
+            ]
+            if pairs_for_res:
+                swap_groups.append(pairs_for_res)
 
     best: float | None = None
     best_flags: list[bool] = []
-    for flags in itertools.product((False, True), repeat=len(pairs)):
+    for flags in itertools.product((False, True), repeat=len(swap_groups)):
         target = y.copy()
-        for swap, (i, j) in zip(flags, pairs):
+        for swap, group_pairs in zip(flags, swap_groups):
             if swap:
-                target[[i, j]] = target[[j, i]]
+                for i, j in group_pairs:
+                    target[[i, j]] = target[[j, i]]
         rot, trans = kabsch_fit(x, target) if transform is None else transform
         val = rmsd(x @ rot + trans, target)
         if best is None or val < best:
@@ -261,8 +301,8 @@ def symmetry_rmsd(
     return {
         "rmsd_A": round(float(best if best is not None else float("nan")), 4),
         "atom_count": len(x),
-        "asp_swaps": best_flags,
-        "symmetry_permutations": 2 ** len(pairs),
+        "symmetry_swaps": best_flags,
+        "symmetry_permutations": 2 ** len(swap_groups),
     }
 
 

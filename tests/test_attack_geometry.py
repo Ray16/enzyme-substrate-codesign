@@ -75,7 +75,7 @@ def test_asp_od1_od2_symmetry_rmsd(tmp_path: Path):
     res = symmetry_rmsd(x, y, desc)
     assert res["rmsd_A"] == pytest.approx(0.0, abs=1e-4)
     assert res["symmetry_permutations"] == 2
-    assert res["asp_swaps"] == [True]
+    assert res["symmetry_swaps"] == [True]
 
 
 def test_geometry_cli(tmp_path: Path):

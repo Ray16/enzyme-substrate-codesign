@@ -1,0 +1,29 @@
+# Example standalone Boltz-2 co-folding configuration (YAML)
+output_dir: boltz_cofold_out
+fasta_path: path/to/candidates.fasta
+protein_chain: A
+
+# Ligands / cofactors to co-fold with each enzyme sequence
+ligands:
+  - id: B
+    ccd: ATP
+  - id: C
+    ccd: MG
+  - id: D
+    smiles: "O=C(O)CCCCC(=O)O"
+
+boltz:
+  executable: boltz
+  diffusion_samples: 5
+  recycling_steps: 3
+  sampling_steps: 200
+  max_parallel_samples: 1
+  output_format: pdb
+  accelerator: gpu
+  devices: 1
+  seed: 0
+  fp32: false
+  use_msa_server: false
+
+chain_pairs:
+  protein_substrate_iptm: ["0", "3"]

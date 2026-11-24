@@ -1,31 +1,32 @@
 # Enzyme–Substrate Co-Design Workflows
 
-Standalone, decoupled Python modules for **saturation mutagenesis** and **partial diffusion** enzyme design paired with **Boltz-2** co-folding validation and **catalytic attack-geometry** scoring.
+Standalone, decoupled Python modules extracted from `Enzyme_agent` (`enzyme_design_agent` and `structural_modeling_agent`) for **saturation mutagenesis**, **partial diffusion**, **Boltz-2 co-folding**, **catalytic attack-geometry evaluation**, and **active-site contact analysis & visualization**.
 
 ## Architecture
 
 ```text
 .
-├── attack_geometry/          # Shared structure parser (PDB/mmCIF), attack-geometry metrics,
-│                             # Kabsch + ASP OD1/OD2 symmetry RMSD, and Boltz-2 I/O
-├── saturation_mutagenesis/   # Workflow 1: Whole-complex pocket scan -> single/multi-site
-│                             # variants -> Boltz-2 co-folding -> geometry & WT-delta ranking
+├── attack_geometry/          # Shared PDB/mmCIF parser, nucleophile-electrophile attack geometry,
+│                             # proximity-weighted ensembles, Kabsch + ASP OD1/OD2 RMSD, Boltz-2 I/O
+├── boltz_cofold/             # Standalone Boltz-2 co-folding: resumable MSA retrieval, standard &
+│                             # FP32 serial-capped prediction, and post-fold QC verification
+├── saturation_mutagenesis/   # Workflow 1: Whole-complex pocket scan -> single/multi-site variants
+│                             # -> Boltz-2 co-folding -> attack-geometry & WT-delta ranking
 ├── partial_diffusion/        # Workflow 2: Partial diffusion (RFD4-Proteina / AlphaProtein Novo)
-│                             # -> Boltz-2 refolding -> attack geometry + motif/backbone RMSD ranking
-├── examples/                 # Configurable YAML templates for both workflows
+│                             # -> Boltz-2 refolding -> geometry + motif/backbone RMSD ranking
+├── contact_analysis/         # Active-site substrate contact detection, ensemble frequency tables,
+│                             # heavy_atom_donor_acceptor_v2 audit, and PyMOL + Matplotlib figures
+├── examples/                 # Configurable YAML/JSON templates for every workflow
 └── tests/                    # Offline, GPU-free unit & integration test suite
 ```
 
-### Catalytic Attack-Geometry Metrics (`attack_geometry/`)
+### Catalytic Geometry & Structural Scoring (`attack_geometry/`)
 
-Both workflows share the same reaction-geometry evaluation engine:
+Both design workflows share a general, reaction-agnostic geometry and confidence evaluation engine:
 
-- **Nucleophile–electrophile distance & attack angle:** Selects candidate nucleophilic atoms (`donor` / `attack_candidates`), picks the nearest heavy atom to `electrophile` (`center`), and computes the angle `donor_best – electrophile – leaving` in degrees.
-- **Proximity-weighted ensemble aggregation:** Aggregates multi-pose Boltz-2 ensembles using inverse-distance weights $w_i = 1 / d_i$:
-  - Weighted attack angle: $\bar{\theta}_w = \frac{\sum_i \theta_i / d_i}{\sum_i 1 / d_i}$
-  - Harmonic distance: $\bar{d}_H = \frac{N}{\sum_i 1 / d_i}$
-- **Bootstrap WT comparison (saturation mutagenesis):** Independent ensemble bootstrap resampling against matched wild-type poses (5th–95th percentile CIs and resampling improvement fractions).
-- **Catalytic residue & backbone alignment (partial diffusion):** Proper-rotation Kabsch superposition for global `N/CA/C/O` backbone RMSD, symmetry-aware catalytic motif all-atom RMSD (resolving equivalent `ASP` `OD1`/`OD2` permutations), and protein–ligand steric clash fraction (`< 1.5 Å`).
+- **Configurable catalytic geometry:** Supports user-defined atom selectors (`donor`, `electrophile`, and optional `leaving` / angle reference) to measure nucleophile–electrophile distances and optional 3-atom attack angles for any enzyme–substrate mechanism.
+- **Ensemble statistics:** Computes standard ensemble summaries (`mean`, `median`, `harmonic_distance_A`) plus optional proximity-weighted angle statistics and wild-type bootstrap comparisons.
+- **General symmetry-aware alignment & clash checks:** Proper-rotation Kabsch superposition for backbone and catalytic-motif RMSD (automatically resolving standard symmetric sidechain atom pairs across ASP, GLU, ARG, PHE, TYR, VAL, LEU, or custom pairs) and configurable protein–ligand clash screening.
 - **Boltz-2 confidence metrics:** Extracts `iptm`, `ligand_iptm`, `complex_plddt`, `complex_iplddt`, `confidence_score`, and directional minimum `pair_chains_iptm` from `confidence_<id>_model_<k>.json`.
 
 ---
@@ -36,28 +37,63 @@ Both workflows share the same reaction-geometry evaluation engine:
 
 ```bash
 pip install -e .
+# With plotting & contact visualization support:
+pip install -e ".[viz]"
 ```
 
-Core dependencies are minimal (`numpy` and `PyYAML`, Python ≥ 3.9). No Biopython is required.
+Core dependencies are minimal (`numpy` and `PyYAML`, Python ≥ 3.9). No Biopython or MDAnalysis is required for PDB/mmCIF cofold analysis.
 
-### Boltz-2 co-folding environment (GPU)
+### Boltz-2 co-folding & PyMOL environment
 
 To run live Boltz-2 co-folding predictions, install this package inside your GPU environment that provides the `boltz` CLI (e.g., an `enzymecage` or dedicated `boltz` conda environment with PyTorch + CUDA):
 
 ```bash
 conda activate enzymecage   # or your Boltz-2 GPU environment
-pip install -e .
-# Verify boltz CLI is available:
+pip install -e ".[viz]"
 boltz predict --help
 ```
 
-For partial diffusion generation, install either **RFD4-Proteina** (`rfd4-generate`) or **AlphaProtein Novo** (`apnovo-run`) in its dedicated environment and point `diffusion.executable` in your YAML config to the corresponding executable.
+- For 3D active-site contact snapshots, ensure `pymol` is on your `PATH` (or pass `--pymol-bin /path/to/pymol` / set `PYMOL_BIN`). If PyMOL is unavailable, `contact-analysis` automatically renders the contact-frequency bar chart and Markdown/CSV reports.
+- For partial diffusion generation, install **RFD4-Proteina** (`rfd4-generate`) or **AlphaProtein Novo** (`apnovo-run`) in its dedicated environment and set `diffusion.executable` in your YAML config.
 
 ---
 
 ## Usage Examples
 
-### 1. Saturation Mutagenesis (`saturation-mutagenesis` / `python -m saturation_mutagenesis`)
+### 1. Standalone Boltz-2 Co-Folding (`boltz-cofold` / `python -m boltz_cofold`)
+
+```bash
+# Fetch & cache sequence-specific MSAs (batches <= 101, SHA-256 verified)
+boltz-cofold prepare-msa \
+  --fasta candidates.fasta \
+  --out-dir msa_out \
+  --cache-dir msa_cache
+
+# Build Boltz-2 YAML inputs (enzyme + substrate/cofactor ligands)
+boltz-cofold prepare-inputs \
+  --fasta candidates.fasta \
+  --config examples/cofold_config.yaml \
+  --msa-index msa_out/index.tsv \
+  --output-dir boltz_cofold_out
+
+# Run Boltz-2 predictions (add --fp32 for V100/FP32 serial sample-cap mode, or --dry-run)
+boltz-cofold predict \
+  --inputs-dir boltz_cofold_out/boltz_inputs \
+  --results-dir boltz_cofold_out/boltz_results \
+  --config examples/cofold_config.yaml \
+  --fp32
+
+# Verify predicted models, sequences, and confidence JSONs
+boltz-cofold verify \
+  --results-dir boltz_cofold_out/boltz_results \
+  --fasta candidates.fasta \
+  --expected-samples 5 \
+  --output-dir boltz_cofold_out/qc
+```
+
+---
+
+### 2. Saturation Mutagenesis (`saturation-mutagenesis` / `python -m saturation_mutagenesis`)
 
 ```bash
 # Step 1: Identify catalytic pocket residues around the connected holo complex
@@ -73,26 +109,7 @@ saturation-mutagenesis generate-variants \
   --label my_enzyme \
   --output-dir saturation_out
 
-# Step 3: Prepare Boltz-2 YAML inputs (enzyme + substrate/cofactor ligands)
-saturation-mutagenesis prepare-boltz \
-  --variants saturation_out/variants.tsv \
-  --config examples/saturation_config.yaml \
-  --output-dir saturation_out
-
-# Step 4: Run Boltz-2 co-folding (add --dry-run to preview commands)
-saturation-mutagenesis run-boltz \
-  --inputs-dir saturation_out/boltz_inputs \
-  --results-dir saturation_out/boltz_results \
-  --config examples/saturation_config.yaml
-
-# Step 5: Score & rank variants by attack geometry and Boltz-2 confidence
-saturation-mutagenesis evaluate \
-  --variants saturation_out/variants.tsv \
-  --results-dir saturation_out/boltz_results \
-  --config examples/saturation_config.yaml \
-  --output-dir saturation_out
-
-# Or run the full pipeline from a single config:
+# Step 3–5: Prepare Boltz-2 inputs, co-fold, and score/rank variants (or run end-to-end)
 saturation-mutagenesis run --config examples/saturation_config.yaml --dry-run
 ```
 
@@ -108,36 +125,18 @@ print(summary["evaluation"]["top_hits"][:5])
 
 ---
 
-### 2. Partial Diffusion (`partial-diffusion` / `python -m partial_diffusion`)
+### 3. Partial Diffusion (`partial-diffusion` / `python -m partial_diffusion`)
 
 ```bash
-# Step 1: Prepare / run partial diffusion generation (RFD4-Proteina or AlphaProtein Novo)
-partial-diffusion run-diffusion \
-  --config examples/partial_diffusion_config.yaml \
-  --output-dir partial_diffusion_out/diffusion_outputs \
-  --dry-run
+# Run partial diffusion (RFD4-Proteina or AlphaProtein Novo) + Boltz-2 refold + ranking
+partial-diffusion run --config examples/partial_diffusion_config.yaml --dry-run
 
-# Step 2: Collect generated CIF/PDB designs and prepare Boltz-2 refolding inputs
-partial-diffusion prepare-boltz \
-  --designs-dir partial_diffusion_out/diffusion_outputs \
-  --config examples/partial_diffusion_config.yaml \
-  --output-dir partial_diffusion_out
-
-# Step 3: Run unrestrained Boltz-2 co-folding validation
-partial-diffusion run-boltz \
-  --inputs-dir partial_diffusion_out/boltz_inputs \
-  --results-dir partial_diffusion_out/boltz_results \
-  --config examples/partial_diffusion_config.yaml
-
-# Step 4: Score designs by attack geometry, motif/backbone RMSD, clashes, and confidence
+# Or score pre-generated designs & Boltz-2 refolds directly:
 partial-diffusion evaluate \
   --designs-dir partial_diffusion_out/diffusion_outputs \
   --results-dir partial_diffusion_out/boltz_results \
   --config examples/partial_diffusion_config.yaml \
   --output-dir partial_diffusion_out
-
-# Or run end-to-end:
-partial-diffusion run --config examples/partial_diffusion_config.yaml --dry-run
 ```
 
 **Python API:**
@@ -152,7 +151,30 @@ print(summary["evaluation"]["top_hits"][:5])
 
 ---
 
-### 3. Standalone Attack-Geometry Evaluation (`enzyme-geometry`)
+### 4. Active-Site Contact Analysis & Visualization (`contact-analysis` / `python -m contact_analysis`)
+
+```bash
+# End-to-end ensemble contact frequency analysis + CSV/JSON/Markdown report + active-site figure
+contact-analysis report \
+  --name my_enzyme \
+  --pose-dir boltz_results/my_enzyme \
+  --output-dir contact_reports
+
+# Run the strict heavy_atom_donor_acceptor_v2 audit (2.4 A quarantine, His/Cys separation)
+contact-analysis audit \
+  --pose model_0.pdb \
+  --target-groups examples/contact_target_groups.json \
+  --output contact_audit.json
+
+# Plot ranked near-attack fraction & distance-vs-angle scatter from pose_geometry.csv
+contact-analysis plot-geometry \
+  --pose-geometry-csv saturation_out/pose_geometry.csv \
+  --out saturation_out/attack_geometry_summary.png
+```
+
+---
+
+### 5. Standalone Attack-Geometry Evaluation (`enzyme-geometry`)
 
 ```bash
 enzyme-geometry model_0.pdb model_1.pdb \
@@ -164,11 +186,10 @@ enzyme-geometry model_0.pdb model_1.pdb \
 
 ## Standardized Outputs
 
-Both workflows emit standardized, machine-readable summaries:
-
-- `variant_summary.csv` / `design_summary.csv`: Ranked table with sequences, ensemble attack geometry (`weighted_angle_deg`, `harmonic_distance_A`), WT deltas (saturation), backbone/motif RMSDs (partial diffusion), steric clash fraction, Boltz-2 confidence scores, and threshold pass/fail status.
-- `pose_geometry.csv`: Per-pose nucleophile–electrophile distances, attack angles, clash fractions, and confidence metrics.
-- `top_hits.json`: JSON summary of campaign counts and ranked top hits.
+- **Saturation mutagenesis:** `variant_summary.csv`, `pose_geometry.csv`, `top_hits.json`
+- **Partial diffusion:** `design_summary.csv`, `pose_geometry.csv`, `top_hits.json`
+- **Boltz-2 co-folding QC:** `cofold_verification.csv`, `cofold_verification.json`
+- **Contact analysis & visualization:** `<name>_contact_frequency.json`, `<name>_contact_summary.csv`, `<name>_contact_report.md`, `<name>_contact_frequency.png`, and `attack_geometry_summary.png`
 
 ---
 

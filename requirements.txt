@@ -1,7 +1,10 @@
 numpy>=1.23
 PyYAML>=6.0
 
-# Optional runtime dependencies (install in your GPU/Boltz-2 environment):
-# boltz>=2.0
-# zstandard>=0.21
-# pytest>=7.0
+# Optional runtime dependencies:
+# boltz>=2.0        # Boltz-2 co-folding (GPU environment)
+# requests>=2.28    # Resumable ColabFold MSA retrieval (boltz-cofold prepare-msa)
+# matplotlib>=3.7   # Contact-frequency & attack-geometry plots (contact-analysis)
+# Pillow>=9.5       # PyMOL + Matplotlib figure composition
+# zstandard>=0.21   # Reading .cif.zst structures
+# pytest>=7.0       # Running offline verification tests

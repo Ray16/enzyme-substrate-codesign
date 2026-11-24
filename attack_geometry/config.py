@@ -84,19 +84,20 @@ class AtomSelector:
 
 @dataclass(frozen=True)
 class GeometryConfig:
-    """Nucleophile-electrophile attack geometry definition.
+    """Configurable catalytic geometry definition.
 
-    Defines three atom selections:
-    - ``donor`` (or ``attack_candidates``): one or more candidate nucleophilic atoms;
-      the nearest atom to ``electrophile`` is selected (deterministic tie-break).
-    - ``electrophile`` (or ``center``): the single attacked atom (angle vertex).
-    - ``leaving`` (or ``angle_reference``): the single leaving/reference atom
-      defining the attack trajectory vector ``leaving - electrophile``.
+    Defines two or three atom selections:
+    - ``donor`` (or ``attack_candidates``): one or more candidate atoms; the
+      nearest atom to ``electrophile`` is selected (deterministic tie-break).
+    - ``electrophile`` (or ``center``): the single reference/target atom.
+    - ``leaving`` (or ``angle_reference``, optional): a single reference atom
+      defining the 3-atom angle ``donor_best -- electrophile -- leaving``.
+      Omit for distance-only catalytic geometry evaluation.
     """
 
     donor: AtomSelector
     electrophile: AtomSelector
-    leaving: AtomSelector
+    leaving: AtomSelector | None = None
     clash_cutoff_A: float = 1.5
 
     @classmethod
@@ -104,10 +105,10 @@ class GeometryConfig:
         donor_raw = data.get("donor", data.get("attack_candidates"))
         elec_raw = data.get("electrophile", data.get("center"))
         leaving_raw = data.get("leaving", data.get("angle_reference"))
-        if donor_raw is None or elec_raw is None or leaving_raw is None:
+        if donor_raw is None or elec_raw is None:
             raise ValueError(
-                "GeometryConfig requires 'donor'/'attack_candidates', "
-                "'electrophile'/'center', and 'leaving'/'angle_reference'."
+                "GeometryConfig requires 'donor'/'attack_candidates' and "
+                "'electrophile'/'center' (plus optional 'leaving'/'angle_reference')."
             )
         donor = AtomSelector.from_dict(donor_raw)
         if "expected_attack_candidates" in data and donor.n_atoms is None:
@@ -123,17 +124,19 @@ class GeometryConfig:
         return cls(
             donor=donor,
             electrophile=AtomSelector.from_dict(elec_raw),
-            leaving=AtomSelector.from_dict(leaving_raw),
+            leaving=AtomSelector.from_dict(leaving_raw) if leaving_raw is not None else None,
             clash_cutoff_A=float(data.get("clash_cutoff_A", 1.5)),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "donor": self.donor.to_dict(),
             "electrophile": self.electrophile.to_dict(),
-            "leaving": self.leaving.to_dict(),
             "clash_cutoff_A": self.clash_cutoff_A,
         }
+        if self.leaving is not None:
+            out["leaving"] = self.leaving.to_dict()
+        return out
 
 
 @dataclass(frozen=True)

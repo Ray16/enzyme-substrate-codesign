@@ -1,0 +1,46 @@
+# Python / packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.venv/
+venv/
+
+# Model weights and checkpoints
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.bin
+*.pkl
+*.npz
+
+# Large structure / trajectory / refolding dumps
+*.cif
+*.cif.gz
+*.cif.zst
+*.mmcif
+*.pdb
+*.xtc
+*.dcd
+*.trr
+*.a3m
+boltz_results/
+boltz_inputs/
+diffusion_outputs/
+saturation_out/
+partial_diffusion_out/
+hydra/
+outputs/
+results/
+logs/
+
+# OS / editor artifacts
+.DS_Store
+*.swp
+*.tmp
+.env

@@ -1,0 +1,85 @@
+# Example partial diffusion + Boltz-2 validation configuration (YAML)
+# Supports `backend: rfd4` (RFD4-Proteina) or `backend: apnovo` (AlphaProtein Novo).
+
+output_dir: partial_diffusion_out
+backend: rfd4
+protein_chain: A
+
+# Partial diffusion backend parameters (RFD4-Proteina example)
+diffusion:
+  executable: rfd4-generate
+  input_path: path/to/motif_conditioned_input.cif
+  num_replicates: 8
+  seed: 42
+  recycle_schedule: midpeak
+  batch_size: 1
+  partial_t: 0.5
+  hf_ckpt_path: nvidia/RFD4-Proteina
+
+# Alternatively, for AlphaProtein Novo partial diffusion:
+# backend: apnovo
+# diffusion:
+#   executable: apnovo-run
+#   motif_cif_path: path/to/motif.cif
+#   partial_diffusion_input_file: path/to/parent_scaffold.cif
+#   partial_diffusion_num_steps: 600
+#   motif_str: "A10-15/B1/C1/D1"
+#   num_designs: 8
+#   resequence: true
+#   resequence_temperature: 0.1
+#   num_sequences: 4
+
+# Ligands / cofactors for independent unrestrained Boltz-2 co-folding validation
+ligands:
+  - id: B
+    ccd: ATP
+  - id: C
+    ccd: MG
+  - id: D
+    smiles: "O=C(O)CCCCC(=O)O"
+
+boltz:
+  executable: boltz
+  diffusion_samples: 5
+  recycling_steps: 3
+  sampling_steps: 200
+  output_format: pdb
+  accelerator: gpu
+  devices: 1
+  seed: 0
+  use_msa_server: true
+
+# Catalytic attack geometry (identical engine to saturation_mutagenesis)
+geometry:
+  donor:
+    chain: D
+    elements: [O]
+    n_atoms: 4
+  electrophile:
+    chain: B
+    atom: PA
+  leaving:
+    chain: B
+    atom: O3A
+  clash_cutoff_A: 1.5
+
+# Optional catalytic motif residues for symmetry-aware (ASP OD1/OD2) Kabsch RMSD
+motif_residues:
+  - position: 10
+    resname: ASP
+    atoms: [CG, OD1, OD2]
+  - position: 25
+    resname: SER
+    atoms: [CB, OG]
+
+# Ranking & pass/fail thresholds
+thresholds:
+  max_distance_A: 4.0
+  min_angle_deg: 120.0
+  max_angle_deg: 180.0
+  max_backbone_rmsd_A: 2.0
+  max_motif_rmsd_A: 1.5
+  max_clash_fraction: 0.0
+  min_confidence: 0.70
+
+top_k: 20

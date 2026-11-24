@@ -1,0 +1,74 @@
+# Example saturation mutagenesis configuration (YAML)
+# Replace structure_path, ligands, and atom selectors for your enzyme-substrate system.
+
+structure_path: path/to/holo_scaffold.pdb
+output_dir: saturation_out
+protein_chain: A
+label: enzyme_scan
+
+# Pocket selection: either specify explicit 1-based residue positions, OR omit
+# `positions` to auto-discover residues within `pocket_cutoff_A` of the connected complex.
+# positions: [143, 190, 215]
+pocket_cutoff_A: 5.0
+link_cutoff_A: 5.0
+# anchor_component: D
+# components: [B, C, D]
+
+# Mutagenesis settings (set max_mutations > 1 or explicit_mutations for multi-site design)
+alphabet: ACDEFGHIKLMNPQRSTVWY
+max_mutations: 1
+include_wt: true
+annotate_positions:
+  143: catalytic_acid_base
+
+# Ligands / cofactors for Boltz-2 co-folding
+ligands:
+  - id: B
+    ccd: ATP
+  - id: C
+    ccd: MG
+  - id: D
+    smiles: "O=C(O)CCCCC(=O)O"
+
+# Boltz-2 prediction settings
+boltz:
+  executable: boltz
+  diffusion_samples: 5
+  recycling_steps: 3
+  sampling_steps: 200
+  max_parallel_samples: 1
+  output_format: pdb
+  accelerator: gpu
+  devices: 1
+  seed: 0
+  use_msa_server: true
+
+# Catalytic nucleophile-electrophile attack geometry
+geometry:
+  donor:
+    chain: D
+    elements: [O]
+    n_atoms: 4
+  electrophile:
+    chain: B
+    atom: PA
+  leaving:
+    chain: B
+    atom: O3A
+  clash_cutoff_A: 1.5
+
+# Ranking & pass/fail thresholds
+thresholds:
+  max_distance_A: 4.0
+  min_angle_deg: 120.0
+  max_angle_deg: 180.0
+  min_confidence: 0.70
+  max_clash_fraction: 0.0
+
+# Optional Boltz-2 pair_chains_iptm diagnostics
+chain_pairs:
+  protein_substrate_iptm: ["0", "3"]
+
+n_bootstrap: 2000
+seed: 0
+top_k: 20

@@ -1,0 +1,7 @@
+numpy>=1.23
+PyYAML>=6.0
+
+# Optional runtime dependencies (install in your GPU/Boltz-2 environment):
+# boltz>=2.0
+# zstandard>=0.21
+# pytest>=7.0

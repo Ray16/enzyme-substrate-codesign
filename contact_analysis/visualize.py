@@ -50,13 +50,51 @@ def _resid(res: str) -> str:
     return "".join(ch for ch in res if ch.isdigit())
 
 
-def _dockedness(freq: dict[str, Any]) -> tuple[float | None, bool, float | None]:
+def _dockedness(
+    freq: dict[str, Any],
+    dock_cutoff_A: float = DOCK_CUT_A,
+) -> tuple[float | None, bool, float | None]:
     react = next((g for k, g in freq.get("groups", {}).items() if k.startswith("reactive")), None)
     if react is None:
         return None, False, None
     d = react.get("d_to_center_A_mean")
     mg = react.get("metal_coordination_freq")
-    return d, (d is not None and d <= DOCK_CUT_A), mg
+    return d, (d is not None and d <= dock_cutoff_A), mg
+
+
+def _ligand_pymol_selections(
+    pose_path: str | Path,
+    *,
+    substrate_chains: Sequence[str] | None = None,
+    cofactor_chains: Sequence[str] | None = None,
+) -> tuple[str, str, str]:
+    """Build general PyMOL selection expressions for (cofactor, metals, substrate).
+
+    Uses ``split_ligands`` on the representative pose so non-phosphorus cofactors
+    (heme, flavin, NAD, PLP) and cofactor-free enzymes are handled accurately.
+    """
+    from attack_geometry.structure import load_structure
+    from .substrate_contacts import split_ligands
+
+    try:
+        st = load_structure(pose_path)
+        cof, metals, sub = split_ligands(
+            st, substrate_chains=substrate_chains, cofactor_chains=cofactor_chains
+        )
+    except (ValueError, OSError):
+        return (
+            "byres (not polymer and elem P)",
+            "not polymer and elem Mg+Mn+Zn+Fe+Ca+Ni+Co+Cu",
+            "not polymer and not cofactor_sel and not metals_sel",
+        )
+
+    def _sel_expr(atoms) -> str:
+        if not atoms:
+            return "none"
+        terms = sorted({f"(chain {a.chain} and resn {a.resname} and resi {a.resnum})" for a in atoms})
+        return " or ".join(terms)
+
+    return _sel_expr(cof), _sel_expr(metals), _sel_expr(sub)
 
 
 def _render_pymol_active_site(
@@ -64,6 +102,8 @@ def _render_pymol_active_site(
     residues: Sequence[dict[str, Any]],
     out_png: Path,
     pymol_bin: str | None = None,
+    substrate_chains: Sequence[str] | None = None,
+    cofactor_chains: Sequence[str] | None = None,
 ) -> tuple[bool, str]:
     """Render a headless PyMOL active-site snapshot highlighting anchoring residues."""
     exe = pymol_bin or os.environ.get("PYMOL_BIN") or shutil.which("pymol")
@@ -71,6 +111,9 @@ def _render_pymol_active_site(
         return False, "pymol binary not found (set --pymol-bin or PYMOL_BIN)"
 
     pose = str(Path(pose_path).expanduser().resolve())
+    cof_sel, metal_sel, sub_sel = _ligand_pymol_selections(
+        pose, substrate_chains=substrate_chains, cofactor_chains=cofactor_chains
+    )
     pml = [
         f"load {pose}, m",
         "hide everything",
@@ -79,20 +122,20 @@ def _render_pymol_active_site(
         "set ray_opaque_background, 1",
         "set cartoon_transparency, 0.88",
         "set stick_radius, 0.16",
-        "select atp_ch, byres (not polymer and elem P)",
-        "select metals, (not polymer and elem Mg+Mn+Zn+Fe+Ca+Ni+Co+Cu)",
-        "select substrate, (not polymer and not atp_ch and not metals)",
+        f"select cofactor_sel, ({cof_sel})",
+        f"select metals_sel, ({metal_sel})",
+        f"select substrate_sel, ({sub_sel})",
         "show cartoon, polymer",
         "color gray90, polymer",
-        "show sticks, substrate",
-        "util.cbao substrate",
-        "set stick_radius, 0.26, substrate",
-        "show sticks, atp_ch",
-        "color gray25, atp_ch",
-        "util.cnc atp_ch",
-        "show spheres, metals",
-        "color forest, metals",
-        "set sphere_scale, 0.45, metals",
+        "show sticks, substrate_sel",
+        "util.cbao substrate_sel",
+        "set stick_radius, 0.26, substrate_sel",
+        "show sticks, cofactor_sel",
+        "color gray25, cofactor_sel",
+        "util.cnc cofactor_sel",
+        "show spheres, metals_sel",
+        "color forest, metals_sel",
+        "set sphere_scale, 0.45, metals_sel",
     ]
     rids: list[str] = []
     for r in residues:
@@ -111,7 +154,7 @@ def _render_pymol_active_site(
                 f"label (polymer and resi {rid} and name CA), '{r['res']}'",
             ]
         )
-    site = "substrate or metals" + "".join(f" or r{rid}" for rid in rids)
+    site = "substrate_sel or metals_sel" + "".join(f" or r{rid}" for rid in rids)
     pml.extend(
         [
             "set label_color, black",
@@ -148,7 +191,10 @@ def render_contact_figure(
     pose_path: str | Path | None = None,
     title: str = "Active-Site Substrate Contacts",
     min_freq: float = 0.5,
+    dock_cutoff_A: float = DOCK_CUT_A,
     pymol_bin: str | None = None,
+    substrate_chains: Sequence[str] | None = None,
+    cofactor_chains: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Render paired 3D PyMOL active-site view (when available) + contact-frequency bar chart."""
     try:
@@ -166,23 +212,30 @@ def render_contact_figure(
     out.parent.mkdir(parents=True, exist_ok=True)
 
     residues = _top_residues(freq, min_freq=min_freq)
-    react_d, docked, react_mg = _dockedness(freq)
+    react_d, docked, react_mg = _dockedness(freq, dock_cutoff_A=dock_cutoff_A)
     if react_d is None:
-        dock_txt, dock_col = "reactive-end distance to reaction center: unknown", "#666666"
+        dock_txt, dock_col = "", "#666666"
     elif docked:
-        dock_txt = f"reactive group -> reaction center: {react_d:.2f} A (docked)"
+        dock_txt = f"reactive group -> reaction center: {react_d:.2f} A (within {dock_cutoff_A:.1f} A)"
         if react_mg is not None:
             dock_txt += f" | metal-coordinated in {react_mg * 100:.0f}% of poses"
         dock_col = "#1b7837"
     else:
-        dock_txt = f"reactive group -> reaction center: {react_d:.2f} A (> {DOCK_CUT_A:.0f} A, non-productive register)"
+        dock_txt = f"reactive group -> reaction center: {react_d:.2f} A (> {dock_cutoff_A:.1f} A)"
         dock_col = "#b23024"
 
     pymol_ok = False
     pymol_note = "no representative pose supplied"
     struct_png = out.with_name(out.stem + "_3d.png")
     if pose_path is not None:
-        pymol_ok, pymol_note = _render_pymol_active_site(pose_path, residues, struct_png, pymol_bin=pymol_bin)
+        pymol_ok, pymol_note = _render_pymol_active_site(
+            pose_path,
+            residues,
+            struct_png,
+            pymol_bin=pymol_bin,
+            substrate_chains=substrate_chains,
+            cofactor_chains=cofactor_chains,
+        )
 
     groups: dict[str, list[dict[str, Any]]] = {}
     for r in residues:
@@ -244,7 +297,8 @@ def render_contact_figure(
         fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=9.5, frameon=False)
 
     fig.suptitle(title, fontsize=14, fontweight="bold", y=0.98)
-    fig.text(0.5, 0.92, dock_txt, ha="center", va="top", fontsize=10.5, color=dock_col, fontweight="bold")
+    if dock_txt:
+        fig.text(0.5, 0.92, dock_txt, ha="center", va="top", fontsize=10.5, color=dock_col, fontweight="bold")
     fig.savefig(out, dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     return {

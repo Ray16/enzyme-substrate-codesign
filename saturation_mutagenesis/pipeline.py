@@ -1,7 +1,8 @@
-"""End-to-end saturation mutagenesis workflow: pocket -> variants -> Boltz-2 -> scoring & ranking."""
+"""End-to-end saturation mutagenesis workflow: pocket -> variants -> Boltz-2 -> mechanism-aware scoring."""
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import statistics
 from dataclasses import dataclass, field
@@ -18,12 +19,22 @@ from attack_geometry.boltz import (
     run_boltz_predict,
     write_boltz_input,
 )
-from attack_geometry.config import GeometryConfig, LigandSpec, ThresholdConfig, load_config
+from attack_geometry.config import (
+    GeometryConfig,
+    LigandSpec,
+    PartnerChainSpec,
+    ThresholdConfig,
+    load_config,
+)
+from attack_geometry.mechanisms import get_mechanism, merge_mechanism_thresholds
 from attack_geometry.metrics import (
     bootstrap_wt_delta,
     clash_fraction,
     evaluate_attack_geometry,
+    evaluate_extra_metrics,
+    evaluate_extra_thresholds,
     evaluate_thresholds,
+    ranking_sort_key,
     summarize_ensemble,
 )
 from attack_geometry.structure import load_structure
@@ -47,7 +58,11 @@ class SaturationConfig:
     structure_path: str
     output_dir: str
     protein_chain: str = "A"
+    partner_chains: list[PartnerChainSpec] = field(default_factory=list)
     label: str = "enzyme"
+    mechanism: str = "custom"
+    target_angle_deg: float | None = None
+    rank_by: str | None = None
     positions: list[int] | None = None
     pocket_cutoff_A: float = 5.0
     link_cutoff_A: float = 5.0
@@ -60,6 +75,7 @@ class SaturationConfig:
     include_wt: bool = True
     ligands: list[LigandSpec] = field(default_factory=list)
     msa_dir: str | None = None
+    msa_index_tsv: str | None = None
     boltz: BoltzConfig = field(default_factory=BoltzConfig)
     geometry: GeometryConfig | None = None
     thresholds: ThresholdConfig = field(default_factory=ThresholdConfig)
@@ -70,20 +86,32 @@ class SaturationConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SaturationConfig":
+        mech = get_mechanism(data.get("mechanism"))
         ligands = [LigandSpec.from_dict(x) for x in data.get("ligands", ())]
+        partners = [PartnerChainSpec.from_dict(x) for x in data.get("partner_chains", ())]
         geometry = GeometryConfig.from_dict(data["geometry"]) if data.get("geometry") else None
-        thresholds = ThresholdConfig.from_dict(data.get("thresholds"))
+        thresholds = merge_mechanism_thresholds(mech, data.get("thresholds"))
         boltz = BoltzConfig.from_dict(data.get("boltz"))
         ann_raw = data.get("annotate_positions") or {}
         annotate = {int(k): str(v) for k, v in ann_raw.items()}
         cp_raw = data.get("chain_pairs") or {}
         chain_pairs = {str(k): (str(v[0]), str(v[1])) for k, v in cp_raw.items()}
         positions = [int(p) for p in data["positions"]] if data.get("positions") else None
+        target_angle = (
+            float(data["target_angle_deg"])
+            if data.get("target_angle_deg") is not None
+            else mech.target_angle_deg
+        )
+        rank_by = str(data["rank_by"]) if data.get("rank_by") else mech.default_rank_by
         return cls(
             structure_path=str(data["structure_path"]),
             output_dir=str(data.get("output_dir", "saturation_out")),
             protein_chain=str(data.get("protein_chain", "A")),
+            partner_chains=partners,
             label=str(data.get("label", "enzyme")),
+            mechanism=mech.name,
+            target_angle_deg=target_angle,
+            rank_by=rank_by,
             positions=positions,
             pocket_cutoff_A=float(data.get("pocket_cutoff_A", 5.0)),
             link_cutoff_A=float(data.get("link_cutoff_A", 5.0)),
@@ -96,6 +124,7 @@ class SaturationConfig:
             include_wt=bool(data.get("include_wt", True)),
             ligands=ligands,
             msa_dir=str(data["msa_dir"]) if data.get("msa_dir") else None,
+            msa_index_tsv=str(data["msa_index_tsv"]) if data.get("msa_index_tsv") else None,
             boltz=boltz,
             geometry=geometry,
             thresholds=thresholds,
@@ -110,30 +139,49 @@ class SaturationConfig:
         return cls.from_dict(load_config(path))
 
 
+def _load_msa_index(msa_index_tsv: str | Path | None) -> dict[str, str]:
+    if msa_index_tsv is None:
+        return {}
+    mapping: dict[str, str] = {}
+    with Path(msa_index_tsv).expanduser().open(newline="") as fh:
+        for row in csv.DictReader(fh, delimiter="\t"):
+            if row.get("id") and row.get("csv"):
+                mapping[row["id"]] = row["csv"]
+            if row.get("seqhash") and row.get("csv"):
+                mapping[row["seqhash"]] = row["csv"]
+    return mapping
+
+
 def prepare_boltz_inputs(
     variants: Sequence[Variant],
     ligands: Sequence[LigandSpec],
     out_dir: str | Path,
     protein_chain: str = "A",
     msa_dir: str | Path | None = None,
+    msa_index_tsv: str | Path | None = None,
+    partner_chains: Sequence[PartnerChainSpec] = (),
 ) -> dict[str, Path]:
     """Write one Boltz-2 YAML input per variant into ``out_dir/boltz_inputs``."""
     inputs_dir = Path(out_dir).expanduser() / "boltz_inputs"
     inputs_dir.mkdir(parents=True, exist_ok=True)
     msa_root = Path(msa_dir).expanduser() if msa_dir else None
+    msa_index = _load_msa_index(msa_index_tsv)
 
     written: dict[str, Path] = {}
     for v in variants:
-        msa_path = None
-        if msa_root is not None:
-            cand = msa_root / f"{v.id}.csv"
-            if cand.is_file():
-                msa_path = cand
+        seq_hash = hashlib.sha256(v.seq.encode("utf-8")).hexdigest()
+        msa_path: str | Path | None = msa_index.get(v.id) or msa_index.get(seq_hash)
+        if msa_path is None and msa_root is not None:
+            for cand in (msa_root / f"{v.id}.csv", msa_root / f"{seq_hash}.csv"):
+                if cand.is_file():
+                    msa_path = cand
+                    break
         doc = build_boltz_input(
             sequence=v.seq,
             ligands=ligands,
             protein_chain=protein_chain,
             msa_path=msa_path,
+            partner_chains=partner_chains,
         )
         written[v.id] = write_boltz_input(doc, inputs_dir / f"{v.id}.yaml")
     return written
@@ -172,6 +220,9 @@ def evaluate_saturation_campaign(
     output_dir: str | Path,
     *,
     protein_chain: str = "A",
+    mechanism: str = "custom",
+    target_angle_deg: float | None = None,
+    rank_by: str | None = None,
     thresholds: ThresholdConfig | None = None,
     chain_pairs: dict[str, tuple[str, str]] | None = None,
     n_bootstrap: int = 2000,
@@ -179,14 +230,12 @@ def evaluate_saturation_campaign(
     top_k: int = 20,
     verify_sequence: bool = True,
 ) -> dict[str, Any]:
-    """Score Boltz-2 predicted structures by catalytic attack geometry and confidence.
+    """Score Boltz-2 predicted structures by mechanism-aware catalytic geometry and confidence."""
+    mech = get_mechanism(mechanism)
+    eff_target_angle = target_angle_deg if target_angle_deg is not None else mech.target_angle_deg
+    eff_rank_by = rank_by or mech.default_rank_by
+    eff_thresholds = thresholds or mech.default_thresholds
 
-    Outputs:
-    - ``variant_summary.csv``: ranked per-variant ensemble metrics, WT deltas, confidence, pass/fail
-    - ``pose_geometry.csv``: per-pose distance, angle, clash fraction, and confidence
-    - ``top_hits.json``: machine-readable campaign summary and top-ranked variants
-    """
-    thresholds = thresholds or ThresholdConfig()
     out = Path(output_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
 
@@ -205,6 +254,7 @@ def evaluate_saturation_campaign(
         geoms = []
         confs: dict[str, list[float]] = {}
         clashes: list[float] = []
+        extras_accum: dict[str, list[float]] = {}
         try:
             for ref in refs:
                 if not ref.structure_path:
@@ -213,10 +263,13 @@ def evaluate_saturation_campaign(
                 if verify_sequence and st.sequence(protein_chain) != v.seq:
                     raise ValueError("Predicted sequence differs from requested variant")
                 g = evaluate_attack_geometry(st, geometry_config)
+                extras = evaluate_extra_metrics(st, geometry_config)
                 cf = clash_fraction(st, protein_chain=protein_chain, cutoff_A=geometry_config.clash_cutoff_A)
                 conf = read_confidence(ref.confidence_path, chain_pairs=chain_pairs)
                 geoms.append(g)
                 clashes.append(cf)
+                for k, val in extras.items():
+                    extras_accum.setdefault(k, []).append(val)
                 for k, val in conf.items():
                     if isinstance(val, (int, float)):
                         confs.setdefault(k, []).append(float(val))
@@ -226,6 +279,7 @@ def evaluate_saturation_campaign(
                         "mutation": v.mutation,
                         "sample": ref.sample,
                         **g.to_dict(),
+                        **extras,
                         "clash_fraction": round(cf, 5),
                         **conf,
                     }
@@ -233,6 +287,9 @@ def evaluate_saturation_campaign(
             if all(g.angle_deg is not None for g in geoms):
                 pose_arrays[v.id] = np.array([[g.distance_A, float(g.angle_deg)] for g in geoms], dtype=float)
             ens = summarize_ensemble(geoms).to_dict()
+            extra_summary = {
+                k: round(statistics.fmean(vals), 4) for k, vals in extras_accum.items() if vals
+            }
             conf_summary = {
                 f"{k}_mean": round(statistics.fmean(vals), 5)
                 for k, vals in confs.items()
@@ -240,6 +297,7 @@ def evaluate_saturation_campaign(
             }
             variant_meta[v.id] = {
                 **ens,
+                **extra_summary,
                 "clash_fraction": round(statistics.fmean(clashes), 5) if clashes else 0.0,
                 **conf_summary,
             }
@@ -267,7 +325,7 @@ def evaluate_saturation_campaign(
         elif v.id in variant_meta:
             metrics = variant_meta[v.id]
             row.update(status="evaluated", **metrics)
-            if wt_id is not None:
+            if wt_id is not None and v.id in pose_arrays:
                 if v.id == wt_id:
                     row.update(
                         delta_angle_deg=0.0,
@@ -284,21 +342,21 @@ def evaluate_saturation_campaign(
                             seed=seed,
                         )
                     )
-            passed, reasons = evaluate_thresholds(row, thresholds)
-            row["passed_thresholds"] = passed
-            row["fail_reasons"] = "; ".join(reasons)
+            passed, reasons = evaluate_thresholds(row, eff_thresholds)
+            extra_reasons = evaluate_extra_thresholds(row, geometry_config)
+            all_reasons = reasons + extra_reasons
+            row["passed_thresholds"] = passed and not extra_reasons
+            row["fail_reasons"] = "; ".join(all_reasons)
         summary_rows.append(row)
 
-    # Rank: passed first, then evaluated, then larger weighted attack angle, then shorter harmonic distance
-    def _rank_key(r: dict[str, Any]) -> tuple:
-        evaluated = r.get("status") == "evaluated"
-        passed = bool(r.get("passed_thresholds", False))
-        angle = float(r.get("weighted_angle_deg", -1.0)) if evaluated else -1.0
-        dist = float(r.get("harmonic_distance_A", 1e9)) if evaluated else 1e9
-        conf = float(r.get("confidence_score_mean", -1.0)) if evaluated else -1.0
-        return (not passed, not evaluated, -angle, dist, -conf, r["variant_id"])
-
-    summary_rows.sort(key=_rank_key)
+    summary_rows.sort(
+        key=lambda r: ranking_sort_key(
+            r,
+            id_key="variant_id",
+            rank_by=eff_rank_by,
+            target_angle_deg=eff_target_angle,
+        )
+    )
     for rank, row in enumerate(summary_rows, start=1):
         row["rank"] = rank if row.get("status") == "evaluated" else ""
 
@@ -309,6 +367,9 @@ def evaluate_saturation_campaign(
     evaluated_rows = [r for r in summary_rows if r.get("status") == "evaluated"]
     top_hits = evaluated_rows[:top_k]
     report = {
+        "mechanism": mech.name,
+        "target_angle_deg": eff_target_angle,
+        "rank_by": eff_rank_by,
         "n_variants": len(variants),
         "n_evaluated": len(evaluated_rows),
         "n_passed_thresholds": sum(1 for r in evaluated_rows if r.get("passed_thresholds")),
@@ -388,6 +449,8 @@ def run_saturation_pipeline(
             out,
             protein_chain=config.protein_chain,
             msa_dir=config.msa_dir,
+            msa_index_tsv=config.msa_index_tsv,
+            partner_chains=config.partner_chains,
         )
         if run_boltz:
             boltz_runs = run_boltz_campaign(
@@ -402,6 +465,9 @@ def run_saturation_pipeline(
             geometry_config=config.geometry,
             output_dir=out,
             protein_chain=config.protein_chain,
+            mechanism=config.mechanism,
+            target_angle_deg=config.target_angle_deg,
+            rank_by=config.rank_by,
             thresholds=config.thresholds,
             chain_pairs=config.chain_pairs,
             n_bootstrap=config.n_bootstrap,
@@ -411,6 +477,7 @@ def run_saturation_pipeline(
 
     return {
         "output_dir": str(out),
+        "mechanism": config.mechanism,
         "n_positions": len(pos_list),
         "n_variants": len(variants),
         "variants_tsv": str(tsv_path),

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-from .config import LigandSpec
+from .config import LigandSpec, PartnerChainSpec
 
 CONFIDENCE_RE = re.compile(r"^confidence_(?P<id>.+)_model_(?P<sample>\d+)\.json$")
 
@@ -86,12 +86,15 @@ def build_boltz_input(
     ligands: Sequence[LigandSpec],
     protein_chain: str = "A",
     msa_path: str | Path | None = None,
+    partner_chains: Sequence[PartnerChainSpec] = (),
 ) -> dict[str, Any]:
-    """Construct a Boltz-2 v1 YAML/JSON input document for enzyme + ligands."""
+    """Construct a Boltz-2 v1 YAML/JSON input document for enzyme (+ optional partner chains) + ligands."""
     protein_entry: dict[str, Any] = {"id": protein_chain, "sequence": sequence}
     if msa_path is not None:
         protein_entry["msa"] = str(Path(msa_path).expanduser().resolve())
     sequences: list[dict[str, Any]] = [{"protein": protein_entry}]
+    for partner in partner_chains:
+        sequences.append(partner.to_boltz_entry())
     for lig in ligands:
         sequences.append(lig.to_boltz_entry())
     return {"version": 1, "sequences": sequences}

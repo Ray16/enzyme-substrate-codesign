@@ -83,10 +83,59 @@ class AtomSelector:
 
 
 @dataclass(frozen=True)
+class ExtraMetricSpec:
+    """Additional named catalytic distance or 3-atom angle descriptor."""
+
+    name: str
+    donor: AtomSelector
+    electrophile: AtomSelector
+    leaving: AtomSelector | None = None
+    max_distance_A: float | None = None
+    min_angle_deg: float | None = None
+    max_angle_deg: float | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ExtraMetricSpec":
+        donor_raw = data.get("donor", data.get("atom_a", data.get("attack_candidates")))
+        elec_raw = data.get("electrophile", data.get("atom_b", data.get("center")))
+        leaving_raw = data.get("leaving", data.get("atom_c", data.get("angle_reference")))
+        if not data.get("name") or donor_raw is None or elec_raw is None:
+            raise ValueError(
+                f"ExtraMetricSpec requires 'name', 'donor'/'atom_a', and 'electrophile'/'atom_b': {data}"
+            )
+        return cls(
+            name=str(data["name"]),
+            donor=AtomSelector.from_dict(donor_raw),
+            electrophile=AtomSelector.from_dict(elec_raw),
+            leaving=AtomSelector.from_dict(leaving_raw) if leaving_raw is not None else None,
+            max_distance_A=float(data["max_distance_A"]) if data.get("max_distance_A") is not None else None,
+            min_angle_deg=float(data["min_angle_deg"]) if data.get("min_angle_deg") is not None else None,
+            max_angle_deg=float(data["max_angle_deg"]) if data.get("max_angle_deg") is not None else None,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "name": self.name,
+            "donor": self.donor.to_dict(),
+            "electrophile": self.electrophile.to_dict(),
+        }
+        if self.leaving is not None:
+            out["leaving"] = self.leaving.to_dict()
+        if self.max_distance_A is not None:
+            out["max_distance_A"] = self.max_distance_A
+        if self.min_angle_deg is not None:
+            out["min_angle_deg"] = self.min_angle_deg
+        if self.max_angle_deg is not None:
+            out["max_angle_deg"] = self.max_angle_deg
+        return out
+
+
+@dataclass(frozen=True)
 class GeometryConfig:
     """Configurable catalytic geometry definition.
 
-    Defines two or three atom selections:
+    Defines two or three primary atom selections plus optional auxiliary metrics
+    (e.g., oxyanion-hole H-bond distance, catalytic-base distance, metal bridge):
     - ``donor`` (or ``attack_candidates``): one or more candidate atoms; the
       nearest atom to ``electrophile`` is selected (deterministic tie-break).
     - ``electrophile`` (or ``center``): the single reference/target atom.
@@ -99,6 +148,7 @@ class GeometryConfig:
     electrophile: AtomSelector
     leaving: AtomSelector | None = None
     clash_cutoff_A: float = 1.5
+    extra_metrics: tuple[ExtraMetricSpec, ...] = ()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GeometryConfig":
@@ -121,11 +171,13 @@ class GeometryConfig:
                 n_atoms=int(data["expected_attack_candidates"]),
                 record_type=donor.record_type,
             )
+        extras = tuple(ExtraMetricSpec.from_dict(x) for x in data.get("extra_metrics", ()))
         return cls(
             donor=donor,
             electrophile=AtomSelector.from_dict(elec_raw),
             leaving=AtomSelector.from_dict(leaving_raw) if leaving_raw is not None else None,
             clash_cutoff_A=float(data.get("clash_cutoff_A", 1.5)),
+            extra_metrics=extras,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -136,6 +188,8 @@ class GeometryConfig:
         }
         if self.leaving is not None:
             out["leaving"] = self.leaving.to_dict()
+        if self.extra_metrics:
+            out["extra_metrics"] = [m.to_dict() for m in self.extra_metrics]
         return out
 
 
@@ -205,3 +259,26 @@ class LigandSpec:
         else:
             payload["ccd"] = self.ccd
         return {"ligand": payload}
+
+
+@dataclass(frozen=True)
+class PartnerChainSpec:
+    """Additional protein chain for oligomeric / multi-subunit Boltz-2 co-folding."""
+
+    id: str
+    sequence: str
+    msa_path: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PartnerChainSpec":
+        return cls(
+            id=str(data["id"]),
+            sequence=str(data["sequence"]).strip().upper(),
+            msa_path=str(data["msa_path"]) if data.get("msa_path") else None,
+        )
+
+    def to_boltz_entry(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"id": self.id, "sequence": self.sequence}
+        if self.msa_path:
+            payload["msa"] = str(Path(self.msa_path).expanduser().resolve())
+        return {"protein": payload}

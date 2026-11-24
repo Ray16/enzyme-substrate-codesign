@@ -147,6 +147,71 @@ def evaluate_attack_geometry(
     )
 
 
+def evaluate_extra_metrics(
+    structure: str | Structure,
+    config: GeometryConfig,
+) -> dict[str, float]:
+    """Evaluate all optional auxiliary distances/angles defined in ``config.extra_metrics``."""
+    if not config.extra_metrics:
+        return {}
+    st = load_structure(structure) if not isinstance(structure, Structure) else structure
+    out: dict[str, float] = {}
+    for spec in config.extra_metrics:
+        sub_cfg = GeometryConfig(
+            donor=spec.donor,
+            electrophile=spec.electrophile,
+            leaving=spec.leaving,
+            clash_cutoff_A=config.clash_cutoff_A,
+        )
+        g = evaluate_attack_geometry(st, sub_cfg)
+        out[f"{spec.name}_distance_A"] = round(g.distance_A, 4)
+        if g.angle_deg is not None:
+            out[f"{spec.name}_angle_deg"] = round(g.angle_deg, 3)
+    return out
+
+
+def ranking_sort_key(
+    row: dict[str, Any],
+    *,
+    id_key: str,
+    rank_by: str = "distance",
+    target_angle_deg: float | None = None,
+) -> tuple:
+    """Mechanism-aware sort key for ranking evaluated variants or designs.
+
+    Supports:
+    - ``angle_error``: minimizes ``|angle - target_angle_deg|`` (e.g. 180° for inline SN2,
+      107° for Bürgi-Dunitz carbonyl addition), breaking ties by shorter distance & higher confidence.
+    - ``distance``: minimizes ``harmonic_distance_A`` / ``mean_distance_A``.
+    - ``confidence``: maximizes ``confidence_score_mean``.
+    - ``iptm``: maximizes ``iptm_mean`` / ``ligand_iptm_mean``.
+    """
+    evaluated = row.get("status") == "evaluated"
+    passed = bool(row.get("passed_thresholds", False))
+    dist = float(row.get("harmonic_distance_A", row.get("mean_distance_A", 1e9))) if evaluated else 1e9
+    angle = row.get("weighted_angle_deg", row.get("mean_angle_deg"))
+    conf = float(row.get("confidence_score_mean", -1.0)) if evaluated else -1.0
+    iptm = float(row.get("iptm_mean", row.get("ligand_iptm_mean", -1.0))) if evaluated else -1.0
+
+    if angle is not None and target_angle_deg is not None:
+        angle_err = abs(float(angle) - float(target_angle_deg))
+    elif angle is not None:
+        angle_err = -float(angle)
+    else:
+        angle_err = 1e9
+
+    if rank_by == "angle_error":
+        primary = (angle_err, dist, -conf)
+    elif rank_by == "confidence":
+        primary = (-conf, dist, angle_err)
+    elif rank_by == "iptm":
+        primary = (-iptm, dist, -conf)
+    else:  # "distance"
+        primary = (dist, angle_err, -conf)
+
+    return (not passed, not evaluated, *primary, str(row.get(id_key, "")))
+
+
 def proximity_weighted_angle_and_distance(poses: np.ndarray | Sequence[Sequence[float]]) -> np.ndarray:
     """Return ``(..., 2)`` array of ``(weighted_angle_deg, harmonic_distance_A)``.
 
@@ -372,3 +437,21 @@ def evaluate_thresholds(
         reasons.append(f"clash_fraction {clash:.4f} > {thresholds.max_clash_fraction:.4f}")
 
     return len(reasons) == 0, reasons
+
+
+def evaluate_extra_thresholds(
+    metrics: dict[str, Any],
+    config: GeometryConfig,
+) -> list[str]:
+    """Check any threshold constraints declared on ``config.extra_metrics``."""
+    reasons: list[str] = []
+    for spec in config.extra_metrics:
+        d = metrics.get(f"{spec.name}_distance_A")
+        if spec.max_distance_A is not None and d is not None and d > spec.max_distance_A:
+            reasons.append(f"{spec.name}_distance {d:.3f} A > {spec.max_distance_A:.3f} A")
+        a = metrics.get(f"{spec.name}_angle_deg")
+        if spec.min_angle_deg is not None and a is not None and a < spec.min_angle_deg:
+            reasons.append(f"{spec.name}_angle {a:.1f} deg < {spec.min_angle_deg:.1f} deg")
+        if spec.max_angle_deg is not None and a is not None and a > spec.max_angle_deg:
+            reasons.append(f"{spec.name}_angle {a:.1f} deg > {spec.max_angle_deg:.1f} deg")
+    return reasons

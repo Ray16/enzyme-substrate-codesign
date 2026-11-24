@@ -7,7 +7,8 @@ import sys
 from pathlib import Path
 
 from attack_geometry.boltz import BoltzConfig
-from attack_geometry.config import GeometryConfig, LigandSpec, ThresholdConfig, load_config
+from attack_geometry.config import GeometryConfig, LigandSpec, PartnerChainSpec, load_config
+from attack_geometry.mechanisms import get_mechanism, merge_mechanism_thresholds
 
 from .pipeline import (
     MotifResidueSpec,
@@ -44,6 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_prep.add_argument("--config", type=Path, required=True, help="YAML/JSON config containing 'ligands'.")
     p_prep.add_argument("--protein-chain", default="A", help="Protein chain ID (default: A).")
     p_prep.add_argument("--msa-dir", type=Path, default=None, help="Optional directory of per-design MSA CSV files.")
+    p_prep.add_argument("--msa-index", type=Path, default=None, help="Optional index.tsv from `boltz-cofold prepare-msa`.")
     p_prep.add_argument("--output-dir", type=Path, required=True, help="Output directory for boltz_inputs/.")
 
     # 3. run-boltz
@@ -92,9 +94,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "prepare-boltz":
         raw = load_config(args.config)
         ligands = [LigandSpec.from_dict(x) for x in raw.get("ligands", ())]
+        partners = [PartnerChainSpec.from_dict(x) for x in raw.get("partner_chains", ())]
         designs = collect_generated_designs(args.designs_dir, protein_chain=args.protein_chain)
         written = prepare_boltz_refolds(
-            designs, ligands, args.output_dir, protein_chain=args.protein_chain, msa_dir=args.msa_dir
+            designs,
+            ligands,
+            args.output_dir,
+            protein_chain=args.protein_chain,
+            msa_dir=args.msa_dir,
+            msa_index_tsv=args.msa_index,
+            partner_chains=partners,
         )
         sys.stdout.write(
             json.dumps(
@@ -122,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "evaluate":
         raw = load_config(args.config)
+        mech = get_mechanism(raw.get("mechanism"))
         designs = collect_generated_designs(args.designs_dir, protein_chain=args.protein_chain)
         geom_cfg = GeometryConfig.from_dict(raw["geometry"])
         thresh_dict = dict(raw.get("thresholds") or {})
@@ -129,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
             thresh_dict["max_distance_A"] = args.max_distance
         if args.min_angle is not None:
             thresh_dict["min_angle_deg"] = args.min_angle
-        thresh_cfg = ThresholdConfig.from_dict(thresh_dict)
+        thresh_cfg = merge_mechanism_thresholds(mech, thresh_dict)
         motif = [MotifResidueSpec.from_dict(x) for x in raw.get("motif_residues", ())]
         cp_raw = raw.get("chain_pairs") or {}
         chain_pairs = {str(k): (str(v[0]), str(v[1])) for k, v in cp_raw.items()}
@@ -139,6 +149,9 @@ def main(argv: list[str] | None = None) -> int:
             geometry_config=geom_cfg,
             output_dir=args.output_dir,
             protein_chain=args.protein_chain,
+            mechanism=mech.name,
+            target_angle_deg=raw.get("target_angle_deg"),
+            rank_by=raw.get("rank_by"),
             motif_residues=motif,
             reference_motif_structure=raw.get("reference_motif_structure"),
             thresholds=thresh_cfg,

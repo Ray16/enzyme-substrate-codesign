@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from attack_geometry.boltz import BoltzConfig
-from attack_geometry.config import LigandSpec, load_config
+from attack_geometry.config import LigandSpec, PartnerChainSpec, load_config
 
 from .msa import parse_fasta, prepare_msas_from_fasta
 from .predict import (
@@ -67,8 +67,14 @@ def main(argv: list[str] | None = None) -> int:
         seqs = parse_fasta(args.fasta)
         raw = load_config(args.config)
         ligands = [LigandSpec.from_dict(x) for x in raw.get("ligands", ())]
+        partners = [PartnerChainSpec.from_dict(x) for x in raw.get("partner_chains", ())]
         written = batch_prepare_boltz_inputs(
-            seqs, ligands, args.output_dir, protein_chain=args.protein_chain, msa_index_tsv=args.msa_index
+            seqs,
+            ligands,
+            args.output_dir,
+            protein_chain=args.protein_chain,
+            partner_chains=partners,
+            msa_index_tsv=args.msa_index,
         )
         sys.stdout.write(json.dumps({"n_inputs": len(written), "inputs_dir": str(args.output_dir / "boltz_inputs")}, indent=2) + "\n")
         return 0

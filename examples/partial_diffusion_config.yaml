@@ -4,6 +4,7 @@
 output_dir: partial_diffusion_out
 backend: rfd4
 protein_chain: A
+mechanism: inline_sn2
 
 # Partial diffusion backend parameters (RFD4-Proteina example)
 diffusion:

@@ -20,12 +20,22 @@ Standalone, decoupled Python modules extracted from `Enzyme_agent` (`enzyme_desi
 └── tests/                    # Offline, GPU-free unit & integration test suite
 ```
 
-### Catalytic Geometry & Structural Scoring (`attack_geometry/`)
+### Mechanism-Aware Catalytic Geometry & Structural Scoring (`attack_geometry/`)
 
-Both design workflows share a general, reaction-agnostic geometry and confidence evaluation engine:
+Reaction mechanism is a first-class configuration parameter (`mechanism`) that determines default target geometry, thresholds, ranking criteria, and recommended structural descriptors (all user-overridable):
 
-- **Configurable catalytic geometry:** Supports user-defined atom selectors (`donor`, `electrophile`, and optional `leaving` / angle reference) to measure nucleophile–electrophile distances and optional 3-atom attack angles for any enzyme–substrate mechanism.
-- **Ensemble statistics:** Computes standard ensemble summaries (`mean`, `median`, `harmonic_distance_A`) plus optional proximity-weighted angle statistics and wild-type bootstrap comparisons.
+| Mechanism Preset | Target Angle | Default `rank_by` | Typical Systems |
+|---|---|---|---|
+| `inline_sn2` | `180°` | `angle_error` | Phosphoryl transfer, adenylation, methyltransfer, haloalkane dehalogenation |
+| `carbonyl_addition` | `107°` (Bürgi–Dunitz) | `angle_error` | Serine/cysteine hydrolases, esterases, acyltransferases, proteases |
+| `general_acid_base` | distance-only | `distance` | Proton-transfer and general acid/base catalysis |
+| `metalloenzyme_coordination` | distance-only (`≤ 2.8 Å`) | `distance` | Inner-sphere Zn²⁺/Fe²⁺/Mn²⁺ metalloenzymes |
+| `custom` | user-defined | user-defined | Any custom reaction geometry or multi-metric scoring |
+
+Inspect all built-in mechanism specifications with `enzyme-geometry --list-mechanisms`.
+
+- **Primary + auxiliary catalytic descriptors:** Supports user-defined primary atom selectors (`donor`, `electrophile`, optional `leaving`) plus any number of named `extra_metrics` (e.g., oxyanion-hole H-bond distance, catalytic-base distance, metal coordination).
+- **Oligomeric & MSA-integrated Boltz-2 inputs:** Supports `partner_chains` for homodimers/heterodimers and seamless `--msa-index index.tsv` handoff from `boltz-cofold prepare-msa`.
 - **General symmetry-aware alignment & clash checks:** Proper-rotation Kabsch superposition for backbone and catalytic-motif RMSD (automatically resolving standard symmetric sidechain atom pairs across ASP, GLU, ARG, PHE, TYR, VAL, LEU, or custom pairs) and configurable protein–ligand clash screening.
 - **Boltz-2 confidence metrics:** Extracts `iptm`, `ligand_iptm`, `complex_plddt`, `complex_iplddt`, `confidence_score`, and directional minimum `pair_chains_iptm` from `confidence_<id>_model_<k>.json`.
 
@@ -193,13 +203,17 @@ enzyme-geometry model_0.pdb model_1.pdb \
 
 ---
 
-## Testing
+## Testing & Offline Demo
 
 ```bash
+# Run the full offline, GPU-free test suite
 pytest -q
+
+# Run a 5-second offline end-to-end demo (pocket scan -> mutagenesis -> mock Boltz-2 -> contact analysis -> plots)
+python examples/run_offline_demo.py --out-dir demo_out
 ```
 
-All tests run offline and GPU-free using synthetic holo PDB/mmCIF structures and mock Boltz-2 outputs.
+All tests and the offline demo run GPU-free using synthetic holo PDB/mmCIF structures and mock Boltz-2 outputs. See [examples/hydrolase_carbonyl_config.yaml](examples/hydrolase_carbonyl_config.yaml) for a cofactor-free `carbonyl_addition` example and [examples/saturation_config.yaml](examples/saturation_config.yaml) for an `inline_sn2` example.
 
 ## License
 

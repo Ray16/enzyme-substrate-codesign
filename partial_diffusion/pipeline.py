@@ -1,4 +1,4 @@
-"""End-to-end partial diffusion workflow: design -> Boltz-2 refold -> geometry + motif RMSD + ranking."""
+"""End-to-end partial diffusion workflow: design -> Boltz-2 refold -> mechanism-aware scoring & ranking."""
 from __future__ import annotations
 
 import csv
@@ -19,12 +19,22 @@ from attack_geometry.boltz import (
     run_boltz_predict,
     write_boltz_input,
 )
-from attack_geometry.config import GeometryConfig, LigandSpec, ThresholdConfig, load_config
+from attack_geometry.config import (
+    GeometryConfig,
+    LigandSpec,
+    PartnerChainSpec,
+    ThresholdConfig,
+    load_config,
+)
+from attack_geometry.mechanisms import get_mechanism, merge_mechanism_thresholds
 from attack_geometry.metrics import (
     clash_fraction,
     evaluate_attack_geometry,
+    evaluate_extra_metrics,
+    evaluate_extra_thresholds,
     evaluate_thresholds,
     kabsch_fit,
+    ranking_sort_key,
     rmsd,
     summarize_ensemble,
     symmetry_rmsd,
@@ -40,9 +50,9 @@ BACKBONE_ATOMS = ("N", "CA", "C", "O")
 class MotifResidueSpec:
     """Catalytic residue specification for motif alignment scoring."""
 
-    position: int                  # 1-based position in designed sequence
-    resname: str                   # 3-letter residue name (e.g. "ASP")
-    atoms: tuple[str, ...]         # Heavy atoms to align (e.g. ("CG", "OD1", "OD2"))
+    position: int
+    resname: str
+    atoms: tuple[str, ...]
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MotifResidueSpec":
@@ -71,13 +81,18 @@ class PartialDiffusionConfig:
     """Complete configuration for a partial diffusion + Boltz-2 validation campaign."""
 
     output_dir: str
-    backend: str = "rfd4"                            # "rfd4" | "apnovo"
+    backend: str = "rfd4"
     diffusion: dict[str, Any] = field(default_factory=dict)
-    designs_dir: str | None = None                   # Optional pre-generated designs dir
+    designs_dir: str | None = None
     design_glob: str = "**/*.cif"
     protein_chain: str = "A"
+    partner_chains: list[PartnerChainSpec] = field(default_factory=list)
+    mechanism: str = "custom"
+    target_angle_deg: float | None = None
+    rank_by: str | None = None
     ligands: list[LigandSpec] = field(default_factory=list)
     msa_dir: str | None = None
+    msa_index_tsv: str | None = None
     boltz: BoltzConfig = field(default_factory=BoltzConfig)
     geometry: GeometryConfig | None = None
     motif_residues: list[MotifResidueSpec] = field(default_factory=list)
@@ -88,11 +103,19 @@ class PartialDiffusionConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PartialDiffusionConfig":
+        mech = get_mechanism(data.get("mechanism"))
         ligands = [LigandSpec.from_dict(x) for x in data.get("ligands", ())]
+        partners = [PartnerChainSpec.from_dict(x) for x in data.get("partner_chains", ())]
         geometry = GeometryConfig.from_dict(data["geometry"]) if data.get("geometry") else None
         motif = [MotifResidueSpec.from_dict(x) for x in data.get("motif_residues", ())]
         cp_raw = data.get("chain_pairs") or {}
         chain_pairs = {str(k): (str(v[0]), str(v[1])) for k, v in cp_raw.items()}
+        target_angle = (
+            float(data["target_angle_deg"])
+            if data.get("target_angle_deg") is not None
+            else mech.target_angle_deg
+        )
+        rank_by = str(data["rank_by"]) if data.get("rank_by") else mech.default_rank_by
         return cls(
             output_dir=str(data.get("output_dir", "partial_diffusion_out")),
             backend=str(data.get("backend", "rfd4")),
@@ -100,15 +123,20 @@ class PartialDiffusionConfig:
             designs_dir=str(data["designs_dir"]) if data.get("designs_dir") else None,
             design_glob=str(data.get("design_glob", "**/*.cif")),
             protein_chain=str(data.get("protein_chain", "A")),
+            partner_chains=partners,
+            mechanism=mech.name,
+            target_angle_deg=target_angle,
+            rank_by=rank_by,
             ligands=ligands,
             msa_dir=str(data["msa_dir"]) if data.get("msa_dir") else None,
+            msa_index_tsv=str(data["msa_index_tsv"]) if data.get("msa_index_tsv") else None,
             boltz=BoltzConfig.from_dict(data.get("boltz")),
             geometry=geometry,
             motif_residues=motif,
             reference_motif_structure=str(data["reference_motif_structure"])
             if data.get("reference_motif_structure")
             else None,
-            thresholds=ThresholdConfig.from_dict(data.get("thresholds")),
+            thresholds=merge_mechanism_thresholds(mech, data.get("thresholds")),
             chain_pairs=chain_pairs,
             top_k=int(data.get("top_k", 20)),
         )
@@ -170,25 +198,45 @@ def collect_generated_designs(
     return records
 
 
+def _load_msa_index(msa_index_tsv: str | Path | None) -> dict[str, str]:
+    if msa_index_tsv is None:
+        return {}
+    mapping: dict[str, str] = {}
+    with Path(msa_index_tsv).expanduser().open(newline="") as fh:
+        for row in csv.DictReader(fh, delimiter="\t"):
+            if row.get("id") and row.get("csv"):
+                mapping[row["id"]] = row["csv"]
+            if row.get("seqhash") and row.get("csv"):
+                mapping[row["seqhash"]] = row["csv"]
+    return mapping
+
+
 def prepare_boltz_refolds(
     designs: Sequence[DesignRecord],
     ligands: Sequence[LigandSpec],
     out_dir: str | Path,
     protein_chain: str = "A",
     msa_dir: str | Path | None = None,
+    msa_index_tsv: str | Path | None = None,
+    partner_chains: Sequence[PartnerChainSpec] = (),
 ) -> dict[str, Path]:
     """Write unrestrained Boltz-2 co-folding inputs for all readable generated designs."""
     inputs_dir = Path(out_dir).expanduser() / "boltz_inputs"
     inputs_dir.mkdir(parents=True, exist_ok=True)
     msa_root = Path(msa_dir).expanduser() if msa_dir else None
+    msa_index = _load_msa_index(msa_index_tsv)
 
     written: dict[str, Path] = {}
     for d in designs:
         if not d.sequence:
             continue
-        msa_path = None
-        if msa_root is not None:
-            for cand in (msa_root / f"{d.design_id}.csv", msa_root / f"{d.sequence_sha256[:16]}.csv"):
+        msa_path: str | Path | None = msa_index.get(d.design_id) or msa_index.get(d.sequence_sha256)
+        if msa_path is None and msa_root is not None:
+            for cand in (
+                msa_root / f"{d.design_id}.csv",
+                msa_root / f"{d.sequence_sha256}.csv",
+                msa_root / f"{d.sequence_sha256[:16]}.csv",
+            ):
                 if cand.is_file():
                     msa_path = cand
                     break
@@ -197,6 +245,7 @@ def prepare_boltz_refolds(
             ligands=ligands,
             protein_chain=protein_chain,
             msa_path=msa_path,
+            partner_chains=partner_chains,
         )
         written[d.design_id] = write_boltz_input(doc, inputs_dir / f"{d.design_id}.yaml")
     return written
@@ -227,9 +276,7 @@ def _backbone_and_motif_rmsd(
     """Compute global N/CA/C/O backbone RMSD and symmetry-aware catalytic motif RMSD."""
     pred_map = pred.atom_map(protein_chain)
     des_map = design.atom_map(protein_chain)
-    common_bb = sorted(
-        k for k in pred_map if k[1] in BACKBONE_ATOMS and k in des_map
-    )
+    common_bb = sorted(k for k in pred_map if k[1] in BACKBONE_ATOMS and k in des_map)
     out: dict[str, float] = {}
     transform = None
     if len(common_bb) >= 3:
@@ -277,6 +324,9 @@ def evaluate_partial_diffusion(
     output_dir: str | Path,
     *,
     protein_chain: str = "A",
+    mechanism: str = "custom",
+    target_angle_deg: float | None = None,
+    rank_by: str | None = None,
     motif_residues: Sequence[MotifResidueSpec] = (),
     reference_motif_structure: str | Path | None = None,
     thresholds: ThresholdConfig | None = None,
@@ -284,14 +334,12 @@ def evaluate_partial_diffusion(
     top_k: int = 20,
     verify_sequence: bool = True,
 ) -> dict[str, Any]:
-    """Score Boltz-2 refolded partial-diffusion designs by geometry, RMSD, clashes, and confidence.
+    """Score Boltz-2 refolded partial-diffusion designs by mechanism-aware geometry, RMSD, and confidence."""
+    mech = get_mechanism(mechanism)
+    eff_target_angle = target_angle_deg if target_angle_deg is not None else mech.target_angle_deg
+    eff_rank_by = rank_by or mech.default_rank_by
+    eff_thresholds = thresholds or mech.default_thresholds
 
-    Outputs:
-    - ``design_summary.csv``: ranked per-design ensemble metrics, backbone/motif RMSDs, clashes, confidence
-    - ``pose_geometry.csv``: per-pose attack geometry, structural RMSDs, and confidence
-    - ``top_hits.json``: machine-readable summary and top-ranked designs
-    """
-    thresholds = thresholds or ThresholdConfig()
     out = Path(output_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     ref_motif_st = load_structure(reference_motif_structure) if reference_motif_structure else None
@@ -326,6 +374,7 @@ def evaluate_partial_diffusion(
             confs: dict[str, list[float]] = {}
             clashes: list[float] = []
             rmsds: dict[str, list[float]] = {}
+            extras_accum: dict[str, list[float]] = {}
             for ref in refs:
                 if not ref.structure_path:
                     raise ValueError(f"Missing structure beside {ref.confidence_path}")
@@ -333,6 +382,7 @@ def evaluate_partial_diffusion(
                 if verify_sequence and d.sequence and pred_st.sequence(protein_chain, strict_numbering=False) != d.sequence:
                     raise ValueError("Refolded sequence differs from generated design")
                 g = evaluate_attack_geometry(pred_st, geometry_config)
+                extras = evaluate_extra_metrics(pred_st, geometry_config)
                 cf = clash_fraction(pred_st, protein_chain=protein_chain, cutoff_A=geometry_config.clash_cutoff_A)
                 r_metrics = _backbone_and_motif_rmsd(
                     pred_st, des_st, protein_chain, motif_residues, ref_motif_st
@@ -340,6 +390,8 @@ def evaluate_partial_diffusion(
                 conf = read_confidence(ref.confidence_path, chain_pairs=chain_pairs)
                 geoms.append(g)
                 clashes.append(cf)
+                for k, val in extras.items():
+                    extras_accum.setdefault(k, []).append(val)
                 for k, val in r_metrics.items():
                     rmsds.setdefault(k, []).append(val)
                 for k, val in conf.items():
@@ -350,6 +402,7 @@ def evaluate_partial_diffusion(
                         "design_id": d.design_id,
                         "sample": ref.sample,
                         **g.to_dict(),
+                        **extras,
                         **r_metrics,
                         "clash_fraction": round(cf, 5),
                         **conf,
@@ -357,6 +410,9 @@ def evaluate_partial_diffusion(
                 )
 
             ens = summarize_ensemble(geoms).to_dict()
+            extra_summary = {
+                k: round(statistics.fmean(vals), 4) for k, vals in extras_accum.items() if vals
+            }
             rmsd_summary = {
                 k: round(statistics.fmean(vals), 4) for k, vals in rmsds.items() if vals
             }
@@ -366,28 +422,30 @@ def evaluate_partial_diffusion(
             row.update(
                 status="evaluated",
                 **ens,
+                **extra_summary,
                 **rmsd_summary,
                 clash_fraction=round(statistics.fmean(clashes), 5) if clashes else 0.0,
                 **conf_summary,
             )
-            passed, reasons = evaluate_thresholds(row, thresholds)
-            row["passed_thresholds"] = passed
-            row["fail_reasons"] = "; ".join(reasons)
+            passed, reasons = evaluate_thresholds(row, eff_thresholds)
+            extra_reasons = evaluate_extra_thresholds(row, geometry_config)
+            all_reasons = reasons + extra_reasons
+            row["passed_thresholds"] = passed and not extra_reasons
+            row["fail_reasons"] = "; ".join(all_reasons)
         except (ValueError, OSError) as exc:
             row["status"] = "qc_failed"
             row["error"] = str(exc)
 
         summary_rows.append(row)
 
-    def _rank_key(r: dict[str, Any]) -> tuple:
-        evaluated = r.get("status") == "evaluated"
-        passed = bool(r.get("passed_thresholds", False))
-        angle = float(r.get("weighted_angle_deg", -1.0)) if evaluated else -1.0
-        dist = float(r.get("harmonic_distance_A", 1e9)) if evaluated else 1e9
-        conf = float(r.get("confidence_score_mean", -1.0)) if evaluated else -1.0
-        return (not passed, not evaluated, -angle, dist, -conf, r["design_id"])
-
-    summary_rows.sort(key=_rank_key)
+    summary_rows.sort(
+        key=lambda r: ranking_sort_key(
+            r,
+            id_key="design_id",
+            rank_by=eff_rank_by,
+            target_angle_deg=eff_target_angle,
+        )
+    )
     for rank, row in enumerate(summary_rows, start=1):
         row["rank"] = rank if row.get("status") == "evaluated" else ""
 
@@ -397,6 +455,9 @@ def evaluate_partial_diffusion(
 
     evaluated_rows = [r for r in summary_rows if r.get("status") == "evaluated"]
     report = {
+        "mechanism": mech.name,
+        "target_angle_deg": eff_target_angle,
+        "rank_by": eff_rank_by,
         "n_designs": len(designs),
         "n_evaluated": len(evaluated_rows),
         "n_passed_thresholds": sum(1 for r in evaluated_rows if r.get("passed_thresholds")),
@@ -445,6 +506,8 @@ def run_partial_diffusion_pipeline(
             out,
             protein_chain=config.protein_chain,
             msa_dir=config.msa_dir,
+            msa_index_tsv=config.msa_index_tsv,
+            partner_chains=config.partner_chains,
         )
         if run_boltz:
             boltz_runs = run_boltz_refolds(
@@ -459,6 +522,9 @@ def run_partial_diffusion_pipeline(
             geometry_config=config.geometry,
             output_dir=out,
             protein_chain=config.protein_chain,
+            mechanism=config.mechanism,
+            target_angle_deg=config.target_angle_deg,
+            rank_by=config.rank_by,
             motif_residues=config.motif_residues,
             reference_motif_structure=config.reference_motif_structure,
             thresholds=config.thresholds,
@@ -469,6 +535,7 @@ def run_partial_diffusion_pipeline(
     return {
         "output_dir": str(out),
         "backend": config.backend,
+        "mechanism": config.mechanism,
         "diffusion": diffusion_result,
         "n_designs_collected": len(designs),
         "n_boltz_inputs": len(boltz_inputs),

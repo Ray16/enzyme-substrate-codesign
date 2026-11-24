@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 
 from attack_geometry.boltz import BoltzConfig
-from attack_geometry.config import GeometryConfig, LigandSpec, ThresholdConfig, load_config
+from attack_geometry.config import GeometryConfig, LigandSpec, PartnerChainSpec, load_config
+from attack_geometry.mechanisms import get_mechanism, merge_mechanism_thresholds
 from attack_geometry.structure import load_structure
 
 from .pipeline import (
@@ -67,6 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_prep.add_argument("--config", type=Path, required=True, help="YAML/JSON config containing 'ligands'.")
     p_prep.add_argument("--protein-chain", default="A", help="Protein chain ID (default: A).")
     p_prep.add_argument("--msa-dir", type=Path, default=None, help="Optional directory of per-variant <id>.csv MSAs.")
+    p_prep.add_argument("--msa-index", type=Path, default=None, help="Optional index.tsv from `boltz-cofold prepare-msa`.")
     p_prep.add_argument("--output-dir", type=Path, required=True, help="Output directory for boltz_inputs/.")
 
     # 4. run-boltz
@@ -181,8 +183,15 @@ def main(argv: list[str] | None = None) -> int:
         variants = read_variants_tsv(args.variants)
         raw = load_config(args.config)
         ligands = [LigandSpec.from_dict(x) for x in raw.get("ligands", ())]
+        partners = [PartnerChainSpec.from_dict(x) for x in raw.get("partner_chains", ())]
         written = prepare_boltz_inputs(
-            variants, ligands, args.output_dir, protein_chain=args.protein_chain, msa_dir=args.msa_dir
+            variants,
+            ligands,
+            args.output_dir,
+            protein_chain=args.protein_chain,
+            msa_dir=args.msa_dir,
+            msa_index_tsv=args.msa_index,
+            partner_chains=partners,
         )
         sys.stdout.write(json.dumps({"n_inputs": len(written), "inputs_dir": str(args.output_dir / "boltz_inputs")}, indent=2) + "\n")
         return 0
@@ -201,13 +210,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "evaluate":
         variants = read_variants_tsv(args.variants)
         raw = load_config(args.config)
+        mech = get_mechanism(raw.get("mechanism"))
         geom_cfg = GeometryConfig.from_dict(raw["geometry"])
         thresh_dict = dict(raw.get("thresholds") or {})
         if args.max_distance is not None:
             thresh_dict["max_distance_A"] = args.max_distance
         if args.min_angle is not None:
             thresh_dict["min_angle_deg"] = args.min_angle
-        thresh_cfg = ThresholdConfig.from_dict(thresh_dict)
+        thresh_cfg = merge_mechanism_thresholds(mech, thresh_dict)
         cp_raw = raw.get("chain_pairs") or {}
         chain_pairs = {str(k): (str(v[0]), str(v[1])) for k, v in cp_raw.items()}
         report = evaluate_saturation_campaign(
@@ -216,6 +226,9 @@ def main(argv: list[str] | None = None) -> int:
             geometry_config=geom_cfg,
             output_dir=args.output_dir,
             protein_chain=args.protein_chain,
+            mechanism=mech.name,
+            target_angle_deg=raw.get("target_angle_deg"),
+            rank_by=raw.get("rank_by"),
             thresholds=thresh_cfg,
             chain_pairs=chain_pairs,
             top_k=args.top_k,

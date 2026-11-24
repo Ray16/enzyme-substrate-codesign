@@ -5,6 +5,7 @@ structure_path: path/to/holo_scaffold.pdb
 output_dir: saturation_out
 protein_chain: A
 label: enzyme_scan
+mechanism: inline_sn2
 
 # Pocket selection: either specify explicit 1-based residue positions, OR omit
 # `positions` to auto-discover residues within `pocket_cutoff_A` of the connected complex.

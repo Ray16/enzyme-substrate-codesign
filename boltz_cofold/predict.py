@@ -29,7 +29,7 @@ from attack_geometry.boltz import (
     run_boltz_predict,
     write_boltz_input,
 )
-from attack_geometry.config import LigandSpec, load_config
+from attack_geometry.config import LigandSpec, PartnerChainSpec, load_config
 from attack_geometry.structure import load_structure
 
 from .msa import parse_fasta
@@ -42,6 +42,7 @@ class CofoldConfig:
     output_dir: str
     fasta_path: str | None = None
     protein_chain: str = "A"
+    partner_chains: list[PartnerChainSpec] = field(default_factory=list)
     ligands: list[LigandSpec] = field(default_factory=list)
     msa_index_tsv: str | None = None
     boltz: BoltzConfig = field(default_factory=BoltzConfig)
@@ -50,12 +51,14 @@ class CofoldConfig:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "CofoldConfig":
         ligands = [LigandSpec.from_dict(x) for x in data.get("ligands", ())]
+        partners = [PartnerChainSpec.from_dict(x) for x in data.get("partner_chains", ())]
         cp_raw = data.get("chain_pairs") or {}
         chain_pairs = {str(k): (str(v[0]), str(v[1])) for k, v in cp_raw.items()}
         return cls(
             output_dir=str(data.get("output_dir", "boltz_cofold_out")),
             fasta_path=str(data["fasta_path"]) if data.get("fasta_path") else None,
             protein_chain=str(data.get("protein_chain", "A")),
+            partner_chains=partners,
             ligands=ligands,
             msa_index_tsv=str(data["msa_index_tsv"]) if data.get("msa_index_tsv") else None,
             boltz=BoltzConfig.from_dict(data.get("boltz")),
@@ -116,6 +119,7 @@ def batch_prepare_boltz_inputs(
     out_dir: str | Path,
     *,
     protein_chain: str = "A",
+    partner_chains: Sequence[PartnerChainSpec] = (),
     msa_index_tsv: str | Path | None = None,
 ) -> dict[str, Path]:
     """Write one Boltz-2 YAML input per sequence in ``sequences``."""
@@ -135,6 +139,7 @@ def batch_prepare_boltz_inputs(
             ligands=ligands,
             protein_chain=protein_chain,
             msa_path=msa_map.get(ident),
+            partner_chains=partner_chains,
         )
         written[ident] = write_boltz_input(doc, inputs_dir / f"{ident}.yaml")
     return written

@@ -1,0 +1,63 @@
+# Example saturation mutagenesis config for a cofactor-free serine hydrolase
+# Demonstrates `mechanism: carbonyl_addition` (Bürgi-Dunitz ~107 deg) + extra_metrics.
+
+structure_path: path/to/hydrolase_holo.pdb
+output_dir: hydrolase_saturation_out
+protein_chain: A
+label: hydrolase_scan
+
+# Mechanism preset sets default target_angle_deg (107.0), rank_by (angle_error),
+# and default thresholds (max_distance_A=3.8, min_angle_deg=85, max_angle_deg=130).
+mechanism: carbonyl_addition
+
+# Optional oligomeric partner chain (uncomment for homodimers / heterodimers):
+# partner_chains:
+#   - id: B
+#     sequence: "MKT..."
+
+positions: [120, 155, 198]
+alphabet: ACDEFGHIKLMNPQRSTVWY
+max_mutations: 1
+include_wt: true
+
+# Single ester substrate on chain L (no cofactor required)
+ligands:
+  - id: L
+    smiles: "CCOC(=O)CCC"
+
+# Optional MSA index from `boltz-cofold prepare-msa`
+# msa_index_tsv: msa_out/index.tsv
+
+boltz:
+  executable: boltz
+  diffusion_samples: 5
+  output_format: pdb
+  accelerator: gpu
+  devices: 1
+  seed: 0
+
+# Primary geometry: Ser120 OG attacking substrate carbonyl C1 (angle reference = carbonyl O1)
+geometry:
+  donor:
+    chain: A
+    resnum: 120
+    atom: OG
+  electrophile:
+    chain: L
+    atom: C1
+  leaving:
+    chain: L
+    atom: O1
+  clash_cutoff_A: 1.5
+  extra_metrics:
+    - name: oxyanion_hole
+      atom_a:
+        chain: A
+        resnum: 52
+        atom: N
+      atom_b:
+        chain: L
+        atom: O1
+      max_distance_A: 3.5
+
+top_k: 20

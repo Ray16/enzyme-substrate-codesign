@@ -25,6 +25,7 @@ venv/
 *.cif.zst
 *.mmcif
 *.pdb
+!examples/data/*.pdb
 *.xtc
 *.dcd
 *.trr

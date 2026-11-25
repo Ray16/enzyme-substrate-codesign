@@ -26,15 +26,15 @@ pytest -q
 
 ---
 
-## Modules
+## Modules (Inputs & Outputs)
 
-| Package / CLI | Purpose |
-|---|---|
-| `attack_geometry` / `enzyme-geometry` | Pure-Python PDB/mmCIF parser (supports ribose prime atoms & gapped/offset PDB numbering), mechanism-aware distance/angle/dihedral scoring, symmetry-aware Kabsch RMSD, clash checks, and Boltz-2 I/O |
-| `boltz_cofold` / `boltz-cofold` | Resumable SHA-256 cached MSA retrieval, standard & FP32 serial-capped Boltz-2 batch execution (`skip_existing`), and post-fold QC |
-| `saturation_mutagenesis` / `saturation-mutagenesis` | Whole-complex pocket scan → single/multi-site variant library → Boltz-2 co-folding → mechanism-aware & WT-delta bootstrap ranking |
-| `partial_diffusion` / `partial-diffusion` | Partial diffusion (`rfd4` / `apnovo`) → unrestrained Boltz-2 refolding → geometry, backbone & catalytic-motif RMSD ranking |
-| `contact_analysis` / `contact-analysis` | Active-site functional-group contact frequencies, strict `heavy_atom_donor_acceptor_v2` audit (sidechain or backbone oxyanion-hole), and Matplotlib/PyMOL figures |
+| Module / CLI | Inputs | Outputs | Purpose |
+|---|---|---|---|
+| `attack_geometry` / `enzyme-geometry` | One or more PDB/mmCIF structures (`.pdb`, `.cif`, `.cif.gz`, `.cif.zst`) + YAML/JSON config (`mechanism`, `geometry`, `thresholds`) | Per-pose & ensemble JSON report (catalytic distance, attack angle, optional dihedral, `extra_metrics`, clash fraction, pass/fail reasons) | Pure-Python structure parser (handles ribose prime atoms & gapped/offset numbering), mechanism-aware geometry scoring, symmetry-aware Kabsch RMSD, and Boltz-2 I/O |
+| `boltz_cofold` / `boltz-cofold` | Protein FASTA + YAML/JSON config (`ligands`, optional `partner_chains`, `nucleic_acids`, `protein_modifications`, `constraints`, `boltz`) | Cached MSA CSVs & `index.tsv`; `boltz_inputs/<id>.yaml`; predicted structures & confidence JSONs in `boltz_results/`; QC tables `cofold_verification.csv` & `.json` | Resumable SHA-256 cached MSA retrieval, standard & FP32 serial-capped Boltz-2 batch execution (`skip_existing`), and post-fold sequence/coordinate QC |
+| `saturation_mutagenesis` / `saturation-mutagenesis` | Holo scaffold PDB/mmCIF + YAML/JSON config (explicit `positions` or `pocket_cutoff_A`, `alphabet`, `max_mutations`, `ligands`, `mechanism`, `geometry`) | `pocket_positions.csv`, `variants.tsv`, `variants.fasta`, `boltz_inputs/`, `boltz_results/`, `pose_geometry.csv`, `variant_summary.csv`, `top_hits.json` | Whole-complex pocket scan → single/multi-site variant library → Boltz-2 co-folding → mechanism-aware & WT-delta bootstrap ranking |
+| `partial_diffusion` / `partial-diffusion` | Parent/motif CIF + YAML/JSON config (`backend`: `rfd4` or `apnovo`, `diffusion`, `ligands`, `geometry`, optional `motif_residues`) | `diffusion_outputs/` (designed CIF/PDBs + `designs.fasta`), `boltz_inputs/`, `boltz_results/`, `pose_geometry.csv`, `design_summary.csv`, `top_hits.json` | Partial diffusion backbone/sequence redesign → unrestrained Boltz-2 refolding → geometry, backbone & catalytic-motif RMSD ranking |
+| `contact_analysis` / `contact-analysis` | Pose directory or PDB/mmCIF list (for `report`/`ensemble`), single pose + `target_groups.json` (for `audit`), or `pose_geometry.csv` (for `plot-geometry`) | `<name>_contact_frequency.json`, `<name>_contact_summary.csv`, `<name>_contact_report.md`, `<name>_contact_frequency.png` (PyMOL/ChimeraX 3D + bar chart), `audit.json`, `attack_geometry_summary.png` | Active-site functional-group contact frequencies, strict `heavy_atom_donor_acceptor_v2` audit (sidechain or backbone oxyanion-hole), and publication figures |
 
 ---
 
@@ -122,13 +122,6 @@ print(summary["evaluation"]["top_hits"][:5])
 ```
 
 ---
-
-## Standardized Outputs
-
-- **Saturation mutagenesis:** `variant_summary.csv`, `pose_geometry.csv`, `top_hits.json`
-- **Partial diffusion:** `design_summary.csv`, `pose_geometry.csv`, `top_hits.json`
-- **Boltz-2 QC:** `cofold_verification.csv`, `cofold_verification.json`
-- **Contact analysis:** `<name>_contact_frequency.json`, `<name>_contact_summary.csv`, `<name>_contact_report.md`, `<name>_contact_frequency.png`, `attack_geometry_summary.png`
 
 ## License
 

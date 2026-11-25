@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from attack_geometry.boltz import BoltzConfig
-from attack_geometry.config import GeometryConfig, LigandSpec, PartnerChainSpec, load_config
+from attack_geometry.config import GeometryConfig, LigandSpec, NucleicAcidSpec, PartnerChainSpec, load_config
 from attack_geometry.mechanisms import get_mechanism, merge_mechanism_thresholds
 
 from .pipeline import (
@@ -95,7 +95,14 @@ def main(argv: list[str] | None = None) -> int:
         raw = load_config(args.config)
         ligands = [LigandSpec.from_dict(x) for x in raw.get("ligands", ())]
         partners = [PartnerChainSpec.from_dict(x) for x in raw.get("partner_chains", ())]
-        designs = collect_generated_designs(args.designs_dir, protein_chain=args.protein_chain)
+        nas = [NucleicAcidSpec.from_dict(x) for x in raw.get("nucleic_acids", ())]
+        mods = [dict(x) for x in raw.get("protein_modifications", ())]
+        constraints = [dict(x) for x in raw.get("constraints", ())]
+        designs = collect_generated_designs(
+            args.designs_dir,
+            protein_chain=args.protein_chain,
+            design_glob=raw.get("design_glob"),
+        )
         written = prepare_boltz_refolds(
             designs,
             ligands,
@@ -104,6 +111,9 @@ def main(argv: list[str] | None = None) -> int:
             msa_dir=args.msa_dir,
             msa_index_tsv=args.msa_index,
             partner_chains=partners,
+            nucleic_acids=nas,
+            protein_modifications=mods,
+            constraints=constraints,
         )
         sys.stdout.write(
             json.dumps(

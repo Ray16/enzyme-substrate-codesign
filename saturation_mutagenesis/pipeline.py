@@ -22,6 +22,7 @@ from attack_geometry.boltz import (
 from attack_geometry.config import (
     GeometryConfig,
     LigandSpec,
+    NucleicAcidSpec,
     PartnerChainSpec,
     ThresholdConfig,
     load_config,
@@ -59,6 +60,9 @@ class SaturationConfig:
     output_dir: str
     protein_chain: str = "A"
     partner_chains: list[PartnerChainSpec] = field(default_factory=list)
+    nucleic_acids: list[NucleicAcidSpec] = field(default_factory=list)
+    protein_modifications: list[dict[str, Any]] = field(default_factory=list)
+    constraints: list[dict[str, Any]] = field(default_factory=list)
     label: str = "enzyme"
     mechanism: str = "custom"
     target_angle_deg: float | None = None
@@ -69,10 +73,14 @@ class SaturationConfig:
     anchor_component: str | None = None
     components: list[str] | None = None
     alphabet: str = AA20
+    min_mutations: int = 1
     max_mutations: int = 1
+    max_variants: int | None = None
     explicit_mutations: list[str] | None = None
     annotate_positions: dict[int, str] = field(default_factory=dict)
     include_wt: bool = True
+    strict_numbering: bool = False
+    skip_existing: bool = True
     ligands: list[LigandSpec] = field(default_factory=list)
     msa_dir: str | None = None
     msa_index_tsv: str | None = None
@@ -89,6 +97,9 @@ class SaturationConfig:
         mech = get_mechanism(data.get("mechanism"))
         ligands = [LigandSpec.from_dict(x) for x in data.get("ligands", ())]
         partners = [PartnerChainSpec.from_dict(x) for x in data.get("partner_chains", ())]
+        nas = [NucleicAcidSpec.from_dict(x) for x in data.get("nucleic_acids", ())]
+        mods = [dict(x) for x in data.get("protein_modifications", ())]
+        constraints = [dict(x) for x in data.get("constraints", ())]
         geometry = GeometryConfig.from_dict(data["geometry"]) if data.get("geometry") else None
         thresholds = merge_mechanism_thresholds(mech, data.get("thresholds"))
         boltz = BoltzConfig.from_dict(data.get("boltz"))
@@ -108,6 +119,9 @@ class SaturationConfig:
             output_dir=str(data.get("output_dir", "saturation_out")),
             protein_chain=str(data.get("protein_chain", "A")),
             partner_chains=partners,
+            nucleic_acids=nas,
+            protein_modifications=mods,
+            constraints=constraints,
             label=str(data.get("label", "enzyme")),
             mechanism=mech.name,
             target_angle_deg=target_angle,
@@ -118,10 +132,14 @@ class SaturationConfig:
             anchor_component=data.get("anchor_component"),
             components=list(data["components"]) if data.get("components") else None,
             alphabet=str(data.get("alphabet", AA20)),
+            min_mutations=int(data.get("min_mutations", 1)),
             max_mutations=int(data.get("max_mutations", 1)),
+            max_variants=int(data["max_variants"]) if data.get("max_variants") is not None else None,
             explicit_mutations=list(data["explicit_mutations"]) if data.get("explicit_mutations") else None,
             annotate_positions=annotate,
             include_wt=bool(data.get("include_wt", True)),
+            strict_numbering=bool(data.get("strict_numbering", False)),
+            skip_existing=bool(data.get("skip_existing", True)),
             ligands=ligands,
             msa_dir=str(data["msa_dir"]) if data.get("msa_dir") else None,
             msa_index_tsv=str(data["msa_index_tsv"]) if data.get("msa_index_tsv") else None,
@@ -160,6 +178,9 @@ def prepare_boltz_inputs(
     msa_dir: str | Path | None = None,
     msa_index_tsv: str | Path | None = None,
     partner_chains: Sequence[PartnerChainSpec] = (),
+    nucleic_acids: Sequence[NucleicAcidSpec] = (),
+    protein_modifications: Sequence[dict[str, Any]] = (),
+    constraints: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Path]:
     """Write one Boltz-2 YAML input per variant into ``out_dir/boltz_inputs``."""
     inputs_dir = Path(out_dir).expanduser() / "boltz_inputs"
@@ -182,6 +203,9 @@ def prepare_boltz_inputs(
             protein_chain=protein_chain,
             msa_path=msa_path,
             partner_chains=partner_chains,
+            nucleic_acids=nucleic_acids,
+            protein_modifications=protein_modifications,
+            constraints=constraints,
         )
         written[v.id] = write_boltz_input(doc, inputs_dir / f"{v.id}.yaml")
     return written
@@ -192,12 +216,19 @@ def run_boltz_campaign(
     results_dir: str | Path,
     boltz_config: BoltzConfig,
     dry_run: bool = False,
+    skip_existing: bool = True,
 ) -> list[dict[str, Any]]:
-    """Run Boltz-2 predictions for every prepared variant YAML."""
+    """Run Boltz-2 predictions (standard or FP32) for every prepared variant YAML."""
     root = Path(results_dir).expanduser()
     records = []
     for vid, yaml_path in input_yamls.items():
-        res = run_boltz_predict(yaml_path, root / vid, boltz_config, dry_run=dry_run)
+        res = run_boltz_predict(
+            yaml_path,
+            root / vid,
+            boltz_config,
+            dry_run=dry_run,
+            skip_existing=skip_existing,
+        )
         records.append({"variant_id": vid, **res})
     return records
 
@@ -260,11 +291,11 @@ def evaluate_saturation_campaign(
                 if not ref.structure_path:
                     raise ValueError(f"Missing structure file beside {ref.confidence_path}")
                 st = load_structure(ref.structure_path)
-                if verify_sequence and st.sequence(protein_chain) != v.seq:
+                if verify_sequence and st.sequence(protein_chain, strict_numbering=False) != v.seq:
                     raise ValueError("Predicted sequence differs from requested variant")
                 g = evaluate_attack_geometry(st, geometry_config)
                 extras = evaluate_extra_metrics(st, geometry_config)
-                cf = clash_fraction(st, protein_chain=protein_chain, cutoff_A=geometry_config.clash_cutoff_A)
+                cf = clash_fraction(st, protein_chain=None, cutoff_A=geometry_config.clash_cutoff_A)
                 conf = read_confidence(ref.confidence_path, chain_pairs=chain_pairs)
                 geoms.append(g)
                 clashes.append(cf)
@@ -286,6 +317,8 @@ def evaluate_saturation_campaign(
                 )
             if all(g.angle_deg is not None for g in geoms):
                 pose_arrays[v.id] = np.array([[g.distance_A, float(g.angle_deg)] for g in geoms], dtype=float)
+            else:
+                pose_arrays[v.id] = np.array([g.distance_A for g in geoms], dtype=float)
             ens = summarize_ensemble(geoms).to_dict()
             extra_summary = {
                 k: round(statistics.fmean(vals), 4) for k, vals in extras_accum.items() if vals
@@ -340,6 +373,7 @@ def evaluate_saturation_campaign(
                             pose_arrays[wt_id],
                             n_bootstrap=n_bootstrap,
                             seed=seed,
+                            target_angle_deg=eff_target_angle,
                         )
                     )
             passed, reasons = evaluate_thresholds(row, eff_thresholds)
@@ -396,11 +430,22 @@ def run_saturation_pipeline(
     out.mkdir(parents=True, exist_ok=True)
 
     st = load_structure(config.structure_path)
-    seq = st.sequence(config.protein_chain)
+    seq = st.sequence(config.protein_chain, strict_numbering=config.strict_numbering)
+    res_map = st.residue_index_map(config.protein_chain)
+
+    def _to_seq_pos(pdb_resnum: int) -> tuple[int, str]:
+        if pdb_resnum in res_map:
+            return res_map[pdb_resnum]
+        if 1 <= pdb_resnum <= len(seq):
+            return pdb_resnum, seq[pdb_resnum - 1]
+        raise ValueError(
+            f"Position {pdb_resnum} not found in chain {config.protein_chain!r} "
+            f"(length {len(seq)})"
+        )
 
     pocket_rows: list[dict[str, Any]] = []
     if config.positions is not None:
-        pos_list = [(p, seq[p - 1]) for p in sorted(set(config.positions))]
+        pos_list = [_to_seq_pos(p) for p in sorted(set(config.positions))]
     else:
         pocket = define_pocket(
             st,
@@ -413,7 +458,7 @@ def run_saturation_pipeline(
         pocket_rows = pocket.to_rows()
         if pocket_rows:
             _write_csv(out / "pocket_positions.csv", pocket_rows)
-        pos_list = [(p.resnum, p.wt_aa) for p in pocket.positions]
+        pos_list = [_to_seq_pos(p.resnum) for p in pocket.positions]
 
     ann_fn = (lambda rn, _wt: config.annotate_positions.get(rn, "")) if config.annotate_positions else None
     if config.explicit_mutations is not None or config.max_mutations > 1:
@@ -422,7 +467,9 @@ def run_saturation_pipeline(
             pos_list if config.explicit_mutations is None else None,
             label=config.label,
             alphabet=config.alphabet,
+            min_mutations=config.min_mutations,
             max_mutations=config.max_mutations,
+            max_variants=config.max_variants,
             explicit_mutations=config.explicit_mutations,
             annotate=ann_fn,
             include_wt=config.include_wt,
@@ -442,7 +489,7 @@ def run_saturation_pipeline(
 
     boltz_inputs: dict[str, Path] = {}
     boltz_runs: list[dict[str, Any]] = []
-    if config.ligands:
+    if config.ligands or config.nucleic_acids or config.partner_chains:
         boltz_inputs = prepare_boltz_inputs(
             variants,
             config.ligands,
@@ -451,10 +498,17 @@ def run_saturation_pipeline(
             msa_dir=config.msa_dir,
             msa_index_tsv=config.msa_index_tsv,
             partner_chains=config.partner_chains,
+            nucleic_acids=config.nucleic_acids,
+            protein_modifications=config.protein_modifications,
+            constraints=config.constraints,
         )
         if run_boltz:
             boltz_runs = run_boltz_campaign(
-                boltz_inputs, out / "boltz_results", config.boltz, dry_run=dry_run
+                boltz_inputs,
+                out / "boltz_results",
+                config.boltz,
+                dry_run=dry_run,
+                skip_existing=config.skip_existing,
             )
 
     eval_report = None

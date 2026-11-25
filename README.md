@@ -1,5 +1,9 @@
 # Enzyme–Substrate Co-Design Workflows
 
+[![CI](https://github.com/Ray16/enzyme-substrate-codesign/actions/workflows/ci.yml/badge.svg)](https://github.com/Ray16/enzyme-substrate-codesign/actions/workflows/ci.yml)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 Standalone, decoupled Python modules extracted from `Enzyme_agent` (`enzyme_design_agent` and `structural_modeling_agent`) for **saturation mutagenesis**, **partial diffusion**, **Boltz-2 co-folding**, **catalytic attack-geometry evaluation**, and **active-site contact analysis & visualization**.
 
 ## Architecture
@@ -28,15 +32,19 @@ Reaction mechanism is a first-class configuration parameter (`mechanism`) that d
 |---|---|---|---|
 | `inline_sn2` | `180°` | `angle_error` | Phosphoryl transfer, adenylation, methyltransfer, haloalkane dehalogenation |
 | `carbonyl_addition` | `107°` (Bürgi–Dunitz) | `angle_error` | Serine/cysteine hydrolases, esterases, acyltransferases, proteases |
+| `hydride_transfer` | `110°` | `distance` | NAD(P)H / flavin (FAD/FMN) oxidoreductases, ketoreductases |
 | `general_acid_base` | distance-only | `distance` | Proton-transfer and general acid/base catalysis |
 | `metalloenzyme_coordination` | distance-only (`≤ 2.8 Å`) | `distance` | Inner-sphere Zn²⁺/Fe²⁺/Mn²⁺ metalloenzymes |
+| `covalent_catalysis` | distance-only (`≤ 3.5 Å`) | `distance` | PLP aldimine, acyl-enzyme, Schiff-base, heme-thiolate intermediates |
 | `custom` | user-defined | user-defined | Any custom reaction geometry or multi-metric scoring |
 
 Inspect all built-in mechanism specifications with `enzyme-geometry --list-mechanisms`.
 
-- **Primary + auxiliary catalytic descriptors:** Supports user-defined primary atom selectors (`donor`, `electrophile`, optional `leaving`) plus any number of named `extra_metrics` (e.g., oxyanion-hole H-bond distance, catalytic-base distance, metal coordination).
-- **Oligomeric & MSA-integrated Boltz-2 inputs:** Supports `partner_chains` for homodimers/heterodimers and seamless `--msa-index index.tsv` handoff from `boltz-cofold prepare-msa`.
-- **General symmetry-aware alignment & clash checks:** Proper-rotation Kabsch superposition for backbone and catalytic-motif RMSD (automatically resolving standard symmetric sidechain atom pairs across ASP, GLU, ARG, PHE, TYR, VAL, LEU, or custom pairs) and configurable protein–ligand clash screening.
+- **General catalytic descriptors:** Supports single or multi-candidate `donor` and `electrophile` selectors (handling symmetric substrates like diesters/epoxides), optional 3-atom attack angles, optional 4-atom signed dihedrals (`dihedral_ref` for prochiral *Re*/*Si*-face stereoselectivity), and any number of named `extra_metrics` (e.g., oxyanion-hole H-bonds, catalytic-base distances, metal coordination).
+- **Oligomeric, covalent, PTM & nucleic-acid Boltz-2 inputs:** Supports `partner_chains` (including `homomer: true` so mutations/designs automatically propagate to identical subunits in homodimers/homotetramers), `nucleic_acids` (DNA/RNA), `protein_modifications` (PTMs), and `constraints` (covalent `bond` / `pocket` restraints), plus resumable `skip_existing` execution and unified `--fp32` support across all workflows.
+- **Experimental structure compatibility:** Pure-Python PDB/mmCIF parser handles unquoted ribose/nucleotide prime atoms (`C1'`, `O2'`, `O5'`) and experimental crystal structures with non-1-based numbering or missing internal loops.
+- **General symmetry-aware alignment & clash checks:** Proper-rotation Kabsch superposition for backbone and (single- or multi-chain) catalytic-motif RMSD (automatically resolving standard symmetric sidechain atom pairs across ASP, GLU, ARG, PHE, TYR, VAL, LEU) and whole-complex protein–ligand clash screening.
+- **Mechanism-aware ensemble statistics & visualization:** Target-angle-aware and distance-only WT bootstrap deltas (`bootstrap_wt_delta`), chemical-group-aware substrate contact analysis (distinguishing carboxylates vs. esters/lactones, carbonyls vs. hydroxyls, phosphorylated substrates vs. cofactors), backbone-capable `heavy_atom_donor_acceptor_v2` auditing, and angle-window / distance-only geometry plotting.
 - **Boltz-2 confidence metrics:** Extracts `iptm`, `ligand_iptm`, `complex_plddt`, `complex_iplddt`, `confidence_score`, and directional minimum `pair_chains_iptm` from `confidence_<id>_model_<k>.json`.
 
 ---
@@ -200,6 +208,21 @@ enzyme-geometry model_0.pdb model_1.pdb \
 - **Partial diffusion:** `design_summary.csv`, `pose_geometry.csv`, `top_hits.json`
 - **Boltz-2 co-folding QC:** `cofold_verification.csv`, `cofold_verification.json`
 - **Contact analysis & visualization:** `<name>_contact_frequency.json`, `<name>_contact_summary.csv`, `<name>_contact_report.md`, `<name>_contact_frequency.png`, and `attack_geometry_summary.png`
+
+---
+
+## Example Visualizations
+
+All figures below are generated offline directly by the package's visualization module (`python examples/generate_example_figures.py --out-dir docs/images`):
+
+### In-Line SN2 Saturation Scan (`mechanism: inline_sn2`, target 180°)
+![In-Line SN2 Saturation Geometry](docs/images/sn2_saturation_geometry.png)
+
+### Serine Hydrolase Bürgi–Dunitz Scan (`mechanism: carbonyl_addition`, 85°–130°, target 107°)
+![Serine Hydrolase Bürgi-Dunitz Geometry](docs/images/hydrolase_burgi_dunitz_geometry.png)
+
+### Ensemble Active-Site Substrate Contact Frequencies
+![Ensemble Active-Site Contacts](docs/images/active_site_contacts_example.png)
 
 ---
 

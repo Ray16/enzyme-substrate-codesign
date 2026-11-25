@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-from .config import LigandSpec, PartnerChainSpec
+from .config import LigandSpec, NucleicAcidSpec, PartnerChainSpec
 
 CONFIDENCE_RE = re.compile(r"^confidence_(?P<id>.+)_model_(?P<sample>\d+)\.json$")
 
@@ -87,17 +87,36 @@ def build_boltz_input(
     protein_chain: str = "A",
     msa_path: str | Path | None = None,
     partner_chains: Sequence[PartnerChainSpec] = (),
+    nucleic_acids: Sequence[NucleicAcidSpec] = (),
+    protein_modifications: Sequence[dict[str, Any]] = (),
+    constraints: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Any]:
-    """Construct a Boltz-2 v1 YAML/JSON input document for enzyme (+ optional partner chains) + ligands."""
+    """Construct a Boltz-2 v1 YAML/JSON input document.
+
+    Supports monomeric or oligomeric proteins (including ``homomer=True``
+    partner chains that automatically inherit the mutated/redesigned target
+    sequence and MSA), post-translational ``protein_modifications``, DNA/RNA
+    ``nucleic_acids``, small-molecule/cofactor/metal ``ligands``, and optional
+    Boltz-2 ``constraints`` (e.g., covalent ``bond`` or ``pocket`` constraints).
+    """
     protein_entry: dict[str, Any] = {"id": protein_chain, "sequence": sequence}
     if msa_path is not None:
         protein_entry["msa"] = str(Path(msa_path).expanduser().resolve())
+    if protein_modifications:
+        protein_entry["modifications"] = [dict(m) for m in protein_modifications]
     sequences: list[dict[str, Any]] = [{"protein": protein_entry}]
     for partner in partner_chains:
-        sequences.append(partner.to_boltz_entry())
+        sequences.append(
+            partner.to_boltz_entry(target_sequence=sequence, target_msa_path=msa_path)
+        )
+    for na in nucleic_acids:
+        sequences.append(na.to_boltz_entry())
     for lig in ligands:
         sequences.append(lig.to_boltz_entry())
-    return {"version": 1, "sequences": sequences}
+    doc: dict[str, Any] = {"version": 1, "sequences": sequences}
+    if constraints:
+        doc["constraints"] = [dict(c) for c in constraints]
+    return doc
 
 
 def write_boltz_input(document: dict[str, Any], path: str | Path) -> Path:
@@ -115,10 +134,13 @@ def build_boltz_command(
     out_dir: str | Path,
     config: BoltzConfig,
 ) -> list[str]:
-    """Build the ``boltz predict`` command line."""
+    """Build the ``boltz predict`` command line (standard or FP32 serial-capped worker)."""
+    if config.fp32:
+        prefix = [sys.executable, "-u", "-m", "boltz_cofold.fp32_worker", "predict"]
+    else:
+        prefix = [config.executable, "predict"]
     cmd = [
-        config.executable,
-        "predict",
+        *prefix,
         str(Path(input_yaml).expanduser()),
         "--out_dir",
         str(Path(out_dir).expanduser()),
@@ -156,12 +178,24 @@ def run_boltz_predict(
     out_dir: str | Path,
     config: BoltzConfig,
     dry_run: bool = False,
+    skip_existing: bool = True,
 ) -> dict[str, Any]:
-    """Invoke ``boltz predict`` for one input YAML (or return the command if ``dry_run``)."""
+    """Invoke ``boltz predict`` for one input YAML (resumable when ``skip_existing=True``)."""
+    yaml_p = Path(input_yaml).expanduser()
     out_path = Path(out_dir).expanduser()
-    cmd = build_boltz_command(input_yaml, out_path, config)
+    cmd = build_boltz_command(yaml_p, out_path, config)
     if dry_run:
         return {"status": "dry_run", "command": cmd, "out_dir": str(out_path)}
+    if skip_existing and out_path.exists():
+        existing = discover_boltz_models(out_path, known_ids={yaml_p.stem})
+        refs = existing.get((yaml_p.stem, ""), [])
+        complete_refs = [r for r in refs if r.structure_path]
+        if len(complete_refs) >= config.diffusion_samples:
+            return {
+                "status": "skipped_existing",
+                "n_existing": len(complete_refs),
+                "out_dir": str(out_path),
+            }
     out_path.mkdir(parents=True, exist_ok=True)
     proc = subprocess.run(cmd, capture_output=True, text=True)
     return {

@@ -11,9 +11,15 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass
 from itertools import combinations
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import numpy as np
+
+
+VALID_SCOPES = frozenset({
+    "protein_sidechain_to_ligand_acceptor",
+    "protein_all_to_ligand_acceptor",
+})
 
 
 @dataclass(frozen=True)
@@ -26,9 +32,9 @@ class ContactPolicy:
     scope: str = "protein_sidechain_to_ligand_acceptor"
 
     def __post_init__(self) -> None:
-        if self.scope != "protein_sidechain_to_ligand_acceptor":
+        if self.scope not in VALID_SCOPES:
             raise ValueError(
-                "Unsupported scope; backbone and other interaction classes need explicit profiles"
+                f"Unsupported scope {self.scope!r}; choose from {sorted(VALID_SCOPES)}"
             )
         if not 0 < self.polar_max_A <= self.audit_max_A or not 0 < self.ionic_max_A <= self.audit_max_A:
             raise ValueError("Invalid distance thresholds")
@@ -96,20 +102,40 @@ def evaluate_contacts(
     atoms: Iterable[Atom],
     groups: Iterable[TargetGroup],
     policy: ContactPolicy = ContactPolicy(),
-    protein_chain: str = "A",
+    protein_chain: str | Sequence[str] | None = "A",
 ) -> list[dict]:
-    """Audit all nearby sidechain N/O/S pairs, retaining explicit rejection reasons."""
+    """Audit nearby protein N/O/S pairs, retaining explicit rejection reasons.
+
+    Supports single-chain (``protein_chain="A"``), multi-chain oligomers
+    (``protein_chain=["A", "B"]``), or all standard polymer chains
+    (``protein_chain=None``). Set ``policy.scope="protein_all_to_ligand_acceptor"``
+    to include backbone amide ``N`` donors (e.g., oxyanion-hole H-bonds).
+    """
     atom_list, group_list = list(atoms), list(groups)
     amap = {(a.chain, a.resi, a.name): a for a in atom_list}
     if len(amap) != len(atom_list):
         raise ValueError("Duplicate atom identities / unresolved alternate conformations")
 
+    if protein_chain is None:
+        allowed_chains: set[str] | None = None
+    elif isinstance(protein_chain, str):
+        allowed_chains = {protein_chain}
+    else:
+        allowed_chains = set(protein_chain)
+
+    include_backbone = policy.scope == "protein_all_to_ligand_acceptor"
+    excluded_bb = {"O", "OXT"} if include_backbone else {"N", "O", "OXT"}
+    target_chains = {g.chain for g in group_list}
+
     prot = [
         a
         for a in atom_list
-        if a.chain == protein_chain
+        if (
+            (allowed_chains is not None and a.chain in allowed_chains)
+            or (allowed_chains is None and a.chain not in target_chains and a.residue in STANDARD)
+        )
         and a.element in {"N", "O", "S"}
-        and a.name not in {"N", "O", "OXT"}
+        and a.name not in excluded_bb
     ]
     out: list[dict] = []
     for g in group_list:
@@ -125,11 +151,17 @@ def evaluate_contacts(
                 d = float(np.linalg.norm(np.subtract(a.xyz, target.xyz)))
                 if d > policy.audit_max_A:
                     continue
-                donor = a.name in DONORS.get(a.residue, set())
+                is_bb_donor = include_backbone and a.name == "N" and a.residue != "PRO"
+                donor = is_bb_donor or (a.name in DONORS.get(a.residue, set()))
                 ionic = a.name in CATIONIC.get(a.residue, set()) and g.formal_charge < 0
-                kind = "potential_ionic" if ionic else "donor_acceptor_polar"
+                if ionic:
+                    kind = "potential_ionic"
+                elif is_bb_donor:
+                    kind = "backbone_amide_polar"
+                else:
+                    kind = "donor_acceptor_polar"
                 limit = policy.ionic_max_A if ionic else policy.polar_max_A
-                ambiguous = a.residue in {"HIS", "CYS"}
+                ambiguous = (not is_bb_donor) and (a.residue in {"HIS", "CYS"})
                 severe_clash = d < COVALENT_RADII.get(a.element, 0.7) + COVALENT_RADII.get(
                     target.element, 0.7
                 )

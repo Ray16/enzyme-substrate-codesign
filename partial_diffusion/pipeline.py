@@ -22,6 +22,7 @@ from attack_geometry.boltz import (
 from attack_geometry.config import (
     GeometryConfig,
     LigandSpec,
+    NucleicAcidSpec,
     PartnerChainSpec,
     ThresholdConfig,
     load_config,
@@ -48,11 +49,12 @@ BACKBONE_ATOMS = ("N", "CA", "C", "O")
 
 @dataclass(frozen=True)
 class MotifResidueSpec:
-    """Catalytic residue specification for motif alignment scoring."""
+    """Catalytic residue specification for motif alignment scoring (supports multi-chain motifs)."""
 
     position: int
     resname: str
     atoms: tuple[str, ...]
+    chain: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MotifResidueSpec":
@@ -60,6 +62,7 @@ class MotifResidueSpec:
             position=int(data["position"]),
             resname=str(data["resname"]).upper(),
             atoms=tuple(str(a) for a in data["atoms"]),
+            chain=str(data["chain"]) if data.get("chain") else None,
         )
 
 
@@ -84,12 +87,16 @@ class PartialDiffusionConfig:
     backend: str = "rfd4"
     diffusion: dict[str, Any] = field(default_factory=dict)
     designs_dir: str | None = None
-    design_glob: str = "**/*.cif"
+    design_glob: str | None = None
     protein_chain: str = "A"
     partner_chains: list[PartnerChainSpec] = field(default_factory=list)
+    nucleic_acids: list[NucleicAcidSpec] = field(default_factory=list)
+    protein_modifications: list[dict[str, Any]] = field(default_factory=list)
+    constraints: list[dict[str, Any]] = field(default_factory=list)
     mechanism: str = "custom"
     target_angle_deg: float | None = None
     rank_by: str | None = None
+    skip_existing: bool = True
     ligands: list[LigandSpec] = field(default_factory=list)
     msa_dir: str | None = None
     msa_index_tsv: str | None = None
@@ -106,6 +113,9 @@ class PartialDiffusionConfig:
         mech = get_mechanism(data.get("mechanism"))
         ligands = [LigandSpec.from_dict(x) for x in data.get("ligands", ())]
         partners = [PartnerChainSpec.from_dict(x) for x in data.get("partner_chains", ())]
+        nas = [NucleicAcidSpec.from_dict(x) for x in data.get("nucleic_acids", ())]
+        mods = [dict(x) for x in data.get("protein_modifications", ())]
+        constraints = [dict(x) for x in data.get("constraints", ())]
         geometry = GeometryConfig.from_dict(data["geometry"]) if data.get("geometry") else None
         motif = [MotifResidueSpec.from_dict(x) for x in data.get("motif_residues", ())]
         cp_raw = data.get("chain_pairs") or {}
@@ -121,12 +131,16 @@ class PartialDiffusionConfig:
             backend=str(data.get("backend", "rfd4")),
             diffusion=dict(data.get("diffusion") or {}),
             designs_dir=str(data["designs_dir"]) if data.get("designs_dir") else None,
-            design_glob=str(data.get("design_glob", "**/*.cif")),
+            design_glob=str(data["design_glob"]) if data.get("design_glob") else None,
             protein_chain=str(data.get("protein_chain", "A")),
             partner_chains=partners,
+            nucleic_acids=nas,
+            protein_modifications=mods,
+            constraints=constraints,
             mechanism=mech.name,
             target_angle_deg=target_angle,
             rank_by=rank_by,
+            skip_existing=bool(data.get("skip_existing", True)),
             ligands=ligands,
             msa_dir=str(data["msa_dir"]) if data.get("msa_dir") else None,
             msa_index_tsv=str(data["msa_index_tsv"]) if data.get("msa_index_tsv") else None,
@@ -151,15 +165,19 @@ def collect_generated_designs(
     *,
     protein_chain: str = "A",
     patterns: tuple[str, ...] = ("*.cif", "*.pdb"),
+    design_glob: str | None = None,
 ) -> list[DesignRecord]:
     """Collect and QC-verify all generated structures in ``designs_dir``."""
     root = Path(designs_dir).expanduser()
     if not root.exists():
         return []
     files: list[Path] = []
-    for pat in patterns:
-        files.extend(root.rglob(pat))
-    files = sorted({p.resolve() for p in files})
+    if design_glob:
+        files.extend(root.glob(design_glob))
+    else:
+        for pat in patterns:
+            files.extend(root.rglob(pat))
+    files = sorted({p.resolve() for p in files if p.is_file()})
 
     records: list[DesignRecord] = []
     seen_ids: set[str] = set()
@@ -219,6 +237,9 @@ def prepare_boltz_refolds(
     msa_dir: str | Path | None = None,
     msa_index_tsv: str | Path | None = None,
     partner_chains: Sequence[PartnerChainSpec] = (),
+    nucleic_acids: Sequence[NucleicAcidSpec] = (),
+    protein_modifications: Sequence[dict[str, Any]] = (),
+    constraints: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Path]:
     """Write unrestrained Boltz-2 co-folding inputs for all readable generated designs."""
     inputs_dir = Path(out_dir).expanduser() / "boltz_inputs"
@@ -246,6 +267,9 @@ def prepare_boltz_refolds(
             protein_chain=protein_chain,
             msa_path=msa_path,
             partner_chains=partner_chains,
+            nucleic_acids=nucleic_acids,
+            protein_modifications=protein_modifications,
+            constraints=constraints,
         )
         written[d.design_id] = write_boltz_input(doc, inputs_dir / f"{d.design_id}.yaml")
     return written
@@ -256,12 +280,19 @@ def run_boltz_refolds(
     results_dir: str | Path,
     boltz_config: BoltzConfig,
     dry_run: bool = False,
+    skip_existing: bool = True,
 ) -> list[dict[str, Any]]:
-    """Run Boltz-2 refolding predictions for every prepared design YAML."""
+    """Run Boltz-2 refolding predictions (standard or FP32) for every prepared design YAML."""
     root = Path(results_dir).expanduser()
     records = []
     for did, yaml_path in input_yamls.items():
-        res = run_boltz_predict(yaml_path, root / did, boltz_config, dry_run=dry_run)
+        res = run_boltz_predict(
+            yaml_path,
+            root / did,
+            boltz_config,
+            dry_run=dry_run,
+            skip_existing=skip_existing,
+        )
         records.append({"design_id": did, **res})
     return records
 
@@ -286,15 +317,28 @@ def _backbone_and_motif_rmsd(
         out["backbone_rmsd_A"] = round(rmsd(x_bb @ transform[0] + transform[1], y_bb), 4)
 
     if motif_residues:
-        target_map = ref_motif_structure.atom_map(protein_chain) if ref_motif_structure else des_map
+        pred_maps: dict[str, dict[tuple[int, str], np.ndarray]] = {protein_chain: pred_map}
+        target_src = ref_motif_structure if ref_motif_structure is not None else design
+        target_maps: dict[str, dict[tuple[int, str], np.ndarray]] = {
+            protein_chain: target_src.atom_map(protein_chain) if ref_motif_structure else des_map
+        }
         x_m, y_m, desc = [], [], []
-        for spec in motif_residues:
+        for idx_spec, spec in enumerate(motif_residues):
+            ch = spec.chain or protein_chain
+            if ch not in pred_maps:
+                pred_maps[ch] = pred.atom_map(ch)
+            if ch not in target_maps:
+                target_maps[ch] = target_src.atom_map(ch)
+            pm = pred_maps[ch]
+            tm = target_maps[ch]
+            # Encode chain + position into unique integer key for symmetry_rmsd grouping
+            unique_pos = spec.position if ch == protein_chain else (idx_spec + 1) * 100000 + spec.position
             for atom_name in spec.atoms:
                 key = (spec.position, atom_name)
-                if key in pred_map and key in target_map:
-                    x_m.append(pred_map[key])
-                    y_m.append(target_map[key])
-                    desc.append((spec.position, spec.resname, atom_name))
+                if key in pm and key in tm:
+                    x_m.append(pm[key])
+                    y_m.append(tm[key])
+                    desc.append((unique_pos, spec.resname, atom_name))
         if len(x_m) >= 3:
             xm_arr = np.array(x_m, dtype=float)
             ym_arr = np.array(y_m, dtype=float)
@@ -383,7 +427,7 @@ def evaluate_partial_diffusion(
                     raise ValueError("Refolded sequence differs from generated design")
                 g = evaluate_attack_geometry(pred_st, geometry_config)
                 extras = evaluate_extra_metrics(pred_st, geometry_config)
-                cf = clash_fraction(pred_st, protein_chain=protein_chain, cutoff_A=geometry_config.clash_cutoff_A)
+                cf = clash_fraction(pred_st, protein_chain=None, cutoff_A=geometry_config.clash_cutoff_A)
                 r_metrics = _backbone_and_motif_rmsd(
                     pred_st, des_st, protein_chain, motif_residues, ref_motif_st
                 )
@@ -489,7 +533,11 @@ def run_partial_diffusion_pipeline(
             config.backend, config.diffusion, designs_dir, dry_run=dry_run
         )
 
-    designs = collect_generated_designs(designs_dir, protein_chain=config.protein_chain)
+    designs = collect_generated_designs(
+        designs_dir,
+        protein_chain=config.protein_chain,
+        design_glob=config.design_glob,
+    )
     fasta_lines = []
     for d in designs:
         if d.sequence:
@@ -499,7 +547,7 @@ def run_partial_diffusion_pipeline(
 
     boltz_inputs: dict[str, Path] = {}
     boltz_runs: list[dict[str, Any]] = []
-    if designs and config.ligands:
+    if designs and (config.ligands or config.nucleic_acids or config.partner_chains):
         boltz_inputs = prepare_boltz_refolds(
             designs,
             config.ligands,
@@ -508,10 +556,17 @@ def run_partial_diffusion_pipeline(
             msa_dir=config.msa_dir,
             msa_index_tsv=config.msa_index_tsv,
             partner_chains=config.partner_chains,
+            nucleic_acids=config.nucleic_acids,
+            protein_modifications=config.protein_modifications,
+            constraints=config.constraints,
         )
         if run_boltz:
             boltz_runs = run_boltz_refolds(
-                boltz_inputs, out / "boltz_results", config.boltz, dry_run=dry_run
+                boltz_inputs,
+                out / "boltz_results",
+                config.boltz,
+                dry_run=dry_run,
+                skip_existing=config.skip_existing,
             )
 
     eval_report = None

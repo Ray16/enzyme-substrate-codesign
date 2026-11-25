@@ -29,7 +29,7 @@ from attack_geometry.boltz import (
     run_boltz_predict,
     write_boltz_input,
 )
-from attack_geometry.config import LigandSpec, PartnerChainSpec, load_config
+from attack_geometry.config import LigandSpec, NucleicAcidSpec, PartnerChainSpec, load_config
 from attack_geometry.structure import load_structure
 
 from .msa import parse_fasta
@@ -43,6 +43,9 @@ class CofoldConfig:
     fasta_path: str | None = None
     protein_chain: str = "A"
     partner_chains: list[PartnerChainSpec] = field(default_factory=list)
+    nucleic_acids: list[NucleicAcidSpec] = field(default_factory=list)
+    protein_modifications: list[dict[str, Any]] = field(default_factory=list)
+    constraints: list[dict[str, Any]] = field(default_factory=list)
     ligands: list[LigandSpec] = field(default_factory=list)
     msa_index_tsv: str | None = None
     boltz: BoltzConfig = field(default_factory=BoltzConfig)
@@ -52,6 +55,9 @@ class CofoldConfig:
     def from_dict(cls, data: dict[str, Any]) -> "CofoldConfig":
         ligands = [LigandSpec.from_dict(x) for x in data.get("ligands", ())]
         partners = [PartnerChainSpec.from_dict(x) for x in data.get("partner_chains", ())]
+        nas = [NucleicAcidSpec.from_dict(x) for x in data.get("nucleic_acids", ())]
+        mods = [dict(x) for x in data.get("protein_modifications", ())]
+        constraints = [dict(x) for x in data.get("constraints", ())]
         cp_raw = data.get("chain_pairs") or {}
         chain_pairs = {str(k): (str(v[0]), str(v[1])) for k, v in cp_raw.items()}
         return cls(
@@ -59,6 +65,9 @@ class CofoldConfig:
             fasta_path=str(data["fasta_path"]) if data.get("fasta_path") else None,
             protein_chain=str(data.get("protein_chain", "A")),
             partner_chains=partners,
+            nucleic_acids=nas,
+            protein_modifications=mods,
+            constraints=constraints,
             ligands=ligands,
             msa_index_tsv=str(data["msa_index_tsv"]) if data.get("msa_index_tsv") else None,
             boltz=BoltzConfig.from_dict(data.get("boltz")),
@@ -120,6 +129,9 @@ def batch_prepare_boltz_inputs(
     *,
     protein_chain: str = "A",
     partner_chains: Sequence[PartnerChainSpec] = (),
+    nucleic_acids: Sequence[NucleicAcidSpec] = (),
+    protein_modifications: Sequence[dict[str, Any]] = (),
+    constraints: Sequence[dict[str, Any]] = (),
     msa_index_tsv: str | Path | None = None,
 ) -> dict[str, Path]:
     """Write one Boltz-2 YAML input per sequence in ``sequences``."""
@@ -131,15 +143,21 @@ def batch_prepare_boltz_inputs(
             for row in csv.DictReader(fh, delimiter="\t"):
                 if row.get("id") and row.get("csv"):
                     msa_map[row["id"]] = row["csv"]
+                if row.get("seqhash") and row.get("csv"):
+                    msa_map[row["seqhash"]] = row["csv"]
 
     written: dict[str, Path] = {}
     for ident, seq in sequences.items():
+        seq_hash = hashlib.sha256(seq.encode("utf-8")).hexdigest()
         doc = build_boltz_input(
             sequence=seq,
             ligands=ligands,
             protein_chain=protein_chain,
-            msa_path=msa_map.get(ident),
+            msa_path=msa_map.get(ident) or msa_map.get(seq_hash),
             partner_chains=partner_chains,
+            nucleic_acids=nucleic_acids,
+            protein_modifications=protein_modifications,
+            constraints=constraints,
         )
         written[ident] = write_boltz_input(doc, inputs_dir / f"{ident}.yaml")
     return written
@@ -151,67 +169,20 @@ def run_cofold_batch(
     boltz_config: BoltzConfig,
     *,
     dry_run: bool = False,
+    skip_existing: bool = True,
 ) -> list[dict[str, Any]]:
     """Run Boltz-2 predictions (standard or FP32 serial-capped) for all YAML inputs."""
     root = Path(results_dir).expanduser()
     records: list[dict[str, Any]] = []
     for ident, yaml_path in input_yamls.items():
-        if boltz_config.fp32:
-            out_path = root / ident
-            cmd = [
-                sys.executable,
-                "-u",
-                "-m",
-                "boltz_cofold.fp32_worker",
-                "predict",
-                str(yaml_path),
-                "--out_dir",
-                str(out_path),
-                "--diffusion_samples",
-                str(boltz_config.diffusion_samples),
-                "--max_parallel_samples",
-                str(boltz_config.max_parallel_samples),
-                "--output_format",
-                boltz_config.output_format,
-                "--accelerator",
-                boltz_config.accelerator,
-                "--devices",
-                str(boltz_config.devices),
-                "--num_workers",
-                str(boltz_config.num_workers),
-                "--preprocessing-threads",
-                str(boltz_config.preprocessing_threads),
-                "--seed",
-                str(boltz_config.seed),
-                "--recycling_steps",
-                str(boltz_config.recycling_steps),
-                "--sampling_steps",
-                str(boltz_config.sampling_steps),
-            ]
-            if boltz_config.cache_dir:
-                cmd.extend(["--cache", str(Path(boltz_config.cache_dir).expanduser())])
-            if boltz_config.use_msa_server:
-                cmd.append("--use_msa_server")
-            cmd.extend(boltz_config.extra_args)
-            if dry_run:
-                records.append({"id": ident, "status": "dry_run", "command": cmd, "out_dir": str(out_path)})
-            else:
-                out_path.mkdir(parents=True, exist_ok=True)
-                proc = subprocess.run(cmd, capture_output=True, text=True)
-                records.append(
-                    {
-                        "id": ident,
-                        "status": "ok" if proc.returncode == 0 else "failed",
-                        "returncode": proc.returncode,
-                        "command": cmd,
-                        "out_dir": str(out_path),
-                        "stdout_tail": proc.stdout[-2000:],
-                        "stderr_tail": proc.stderr[-2000:],
-                    }
-                )
-        else:
-            res = run_boltz_predict(yaml_path, root / ident, boltz_config, dry_run=dry_run)
-            records.append({"id": ident, **res})
+        res = run_boltz_predict(
+            yaml_path,
+            root / ident,
+            boltz_config,
+            dry_run=dry_run,
+            skip_existing=skip_existing,
+        )
+        records.append({"id": ident, **res})
     return records
 
 

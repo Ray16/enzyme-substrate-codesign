@@ -32,7 +32,7 @@ STANDARD_SYMMETRY_PAIRS: dict[str, tuple[tuple[str, str], ...]] = {
 
 @dataclass(frozen=True)
 class AttackGeometry:
-    """Per-pose catalytic distance and optional 3-atom angle."""
+    """Per-pose catalytic distance, optional 3-atom angle, and optional 4-atom signed dihedral."""
 
     distance_A: float
     angle_deg: float | None
@@ -44,6 +44,7 @@ class AttackGeometry:
     leaving_chain: str | None
     leaving_atom: str | None
     n_candidates: int
+    dihedral_deg: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -59,12 +60,14 @@ class AttackGeometry:
         if self.leaving_atom is not None:
             out["leaving_chain"] = self.leaving_chain
             out["leaving_atom"] = self.leaving_atom
+        if self.dihedral_deg is not None:
+            out["dihedral_deg"] = round(self.dihedral_deg, 3)
         return out
 
 
 @dataclass(frozen=True)
 class EnsembleGeometry:
-    """Ensemble summary of per-pose distances and (optional) angles."""
+    """Ensemble summary of per-pose distances, optional angles, and optional dihedrals."""
 
     n_poses: int
     mean_distance_A: float
@@ -73,6 +76,7 @@ class EnsembleGeometry:
     mean_angle_deg: float | None = None
     median_angle_deg: float | None = None
     weighted_angle_deg: float | None = None
+    mean_dihedral_deg: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -85,45 +89,74 @@ class EnsembleGeometry:
             out["mean_angle_deg"] = round(self.mean_angle_deg, 3)
             out["median_angle_deg"] = round(self.median_angle_deg, 3)
             out["weighted_angle_deg"] = round(self.weighted_angle_deg, 3)
+        if self.mean_dihedral_deg is not None:
+            out["mean_dihedral_deg"] = round(self.mean_dihedral_deg, 3)
         return out
+
+
+def _signed_dihedral_deg(p0: np.ndarray, p1: np.ndarray, p2: np.ndarray, p3: np.ndarray) -> float:
+    """Compute signed IUPAC dihedral angle (degrees in [-180, 180]) for p0-p1-p2-p3."""
+    b0 = p0 - p1
+    b1 = p2 - p1
+    b2 = p3 - p2
+    b1_norm = float(np.linalg.norm(b1))
+    if b1_norm <= 0.0:
+        raise ValueError("Degenerate dihedral geometry (zero central bond vector)")
+    b1_u = b1 / b1_norm
+    v = b0 - np.dot(b0, b1_u) * b1_u
+    w = b2 - np.dot(b2, b1_u) * b1_u
+    if float(np.linalg.norm(v)) <= 1e-12 or float(np.linalg.norm(w)) <= 1e-12:
+        raise ValueError("Degenerate collinear dihedral geometry")
+    x = float(np.dot(v, w))
+    y = float(np.dot(np.cross(b1_u, v), w))
+    return math.degrees(math.atan2(y, x))
 
 
 def evaluate_attack_geometry(
     structure: str | Structure,
     config: GeometryConfig,
 ) -> AttackGeometry:
-    """Compute distance between nearest ``donor`` atom and ``electrophile``, plus optional angle."""
+    """Compute catalytic distance, optional 3-atom angle, and optional 4-atom dihedral.
+
+    Supports both single and multi-candidate ``donor`` and ``electrophile``
+    selections (choosing the closest ``(donor, electrophile)`` pair so symmetric
+    substrates such as diesters, epoxides, or disulfides are handled cleanly).
+    """
     st = load_structure(structure) if not isinstance(structure, Structure) else structure
     donors = select_atoms(st, config.donor)
     centers = select_atoms(st, config.electrophile)
-    if len(centers) != 1:
-        raise ValueError(
-            f"{st.path}: electrophile/center selector matched {len(centers)} atoms; expected 1."
-        )
 
-    center = centers[0]
     donor_coords = np.asarray([a.xyz for a in donors], dtype=float)
-    if not (np.isfinite(donor_coords).all() and np.isfinite(center.xyz).all()):
+    center_coords = np.asarray([a.xyz for a in centers], dtype=float)
+    if not (np.isfinite(donor_coords).all() and np.isfinite(center_coords).all()):
         raise ValueError(f"{st.path}: non-finite coordinates in selected atoms")
 
-    distances = np.linalg.norm(donor_coords - center.xyz, axis=1)
-    best_idx = int(np.argmin(distances))
-    best_donor = donors[best_idx]
-    d = float(distances[best_idx])
+    dist_matrix = np.linalg.norm(donor_coords[:, None, :] - center_coords[None, :, :], axis=-1)
+    flat_best = int(np.argmin(dist_matrix))
+    best_d_idx, best_c_idx = divmod(flat_best, len(centers))
+    best_donor = donors[best_d_idx]
+    center = centers[best_c_idx]
+    d = float(dist_matrix[best_d_idx, best_c_idx])
 
     angle: float | None = None
     leaving_chain: str | None = None
     leaving_atom: str | None = None
+    leaving = None
     if config.leaving is not None:
         leavings = select_atoms(st, config.leaving)
-        if len(leavings) != 1:
-            raise ValueError(
-                f"{st.path}: leaving/angle_reference selector matched {len(leavings)} atoms; expected 1."
-            )
-        leaving = leavings[0]
+        if len(leavings) == 1:
+            leaving = leavings[0]
+        else:
+            # For symmetric substrates with multiple equivalent leaving/reference atoms,
+            # pick the leaving atom nearest to the selected electrophile center.
+            l_coords = np.asarray([a.xyz for a in leavings], dtype=float)
+            if not np.isfinite(l_coords).all():
+                raise ValueError(f"{st.path}: non-finite coordinates in angle reference atoms")
+            l_dists = np.linalg.norm(l_coords - center.xyz, axis=1)
+            leaving = leavings[int(np.argmin(l_dists))]
         if not np.isfinite(leaving.xyz).all():
             raise ValueError(f"{st.path}: non-finite coordinates in angle reference atom")
-        u = donor_coords[best_idx] - center.xyz
+        u = donor_coords[best_d_idx] - center.xyz
         v = leaving.xyz - center.xyz
         denom = float(np.linalg.norm(u) * np.linalg.norm(v))
         if denom <= 0.0:
@@ -132,6 +165,22 @@ def evaluate_attack_geometry(
         angle = math.degrees(math.acos(cos_theta))
         leaving_chain = leaving.chain
         leaving_atom = leaving.name
+
+    dihedral: float | None = None
+    if config.dihedral_ref is not None:
+        if leaving is None:
+            raise ValueError(
+                f"{st.path}: 'dihedral_ref' requires 'leaving' to define a 4-atom dihedral."
+            )
+        drefs = select_atoms(st, config.dihedral_ref)
+        if len(drefs) == 1:
+            dref = drefs[0]
+        else:
+            dr_coords = np.asarray([a.xyz for a in drefs], dtype=float)
+            dref = drefs[int(np.argmin(np.linalg.norm(dr_coords - center.xyz, axis=1)))]
+        if not np.isfinite(dref.xyz).all():
+            raise ValueError(f"{st.path}: non-finite coordinates in dihedral reference atom")
+        dihedral = _signed_dihedral_deg(donor_coords[best_d_idx], center.xyz, leaving.xyz, dref.xyz)
 
     return AttackGeometry(
         distance_A=d,
@@ -143,7 +192,8 @@ def evaluate_attack_geometry(
         center_atom=center.name,
         leaving_chain=leaving_chain,
         leaving_atom=leaving_atom,
-        n_candidates=len(donors),
+        n_candidates=len(donors) * len(centers),
+        dihedral_deg=dihedral,
     )
 
 
@@ -151,7 +201,7 @@ def evaluate_extra_metrics(
     structure: str | Structure,
     config: GeometryConfig,
 ) -> dict[str, float]:
-    """Evaluate all optional auxiliary distances/angles defined in ``config.extra_metrics``."""
+    """Evaluate all optional auxiliary distances/angles/dihedrals in ``config.extra_metrics``."""
     if not config.extra_metrics:
         return {}
     st = load_structure(structure) if not isinstance(structure, Structure) else structure
@@ -161,12 +211,15 @@ def evaluate_extra_metrics(
             donor=spec.donor,
             electrophile=spec.electrophile,
             leaving=spec.leaving,
+            dihedral_ref=spec.dihedral_ref,
             clash_cutoff_A=config.clash_cutoff_A,
         )
         g = evaluate_attack_geometry(st, sub_cfg)
         out[f"{spec.name}_distance_A"] = round(g.distance_A, 4)
         if g.angle_deg is not None:
             out[f"{spec.name}_angle_deg"] = round(g.angle_deg, 3)
+        if g.dihedral_deg is not None:
+            out[f"{spec.name}_dihedral_deg"] = round(g.dihedral_deg, 3)
     return out
 
 
@@ -231,12 +284,21 @@ def proximity_weighted_angle_and_distance(poses: np.ndarray | Sequence[Sequence[
     return np.stack([(a * w).sum(axis=-1) / w_sum, d.shape[-1] / w_sum], axis=-1)
 
 
+def _circular_mean_deg(angles_deg: np.ndarray) -> float:
+    rads = np.deg2rad(angles_deg)
+    return float(math.degrees(math.atan2(float(np.mean(np.sin(rads))), float(np.mean(np.cos(rads))))))
+
+
 def summarize_ensemble(geometries: Sequence[AttackGeometry]) -> EnsembleGeometry:
     """Aggregate per-pose geometries into standard and inverse-distance ensemble statistics."""
     if not geometries:
         raise ValueError("Cannot summarize an empty pose ensemble")
     dists = np.array([g.distance_A for g in geometries], dtype=float)
     h_dist = float(len(dists) / np.sum(1.0 / dists))
+
+    mean_dihed: float | None = None
+    if all(g.dihedral_deg is not None for g in geometries):
+        mean_dihed = _circular_mean_deg(np.array([float(g.dihedral_deg) for g in geometries], dtype=float))
 
     if all(g.angle_deg is not None for g in geometries):
         angles = np.array([float(g.angle_deg) for g in geometries], dtype=float)
@@ -250,6 +312,7 @@ def summarize_ensemble(geometries: Sequence[AttackGeometry]) -> EnsembleGeometry
             mean_angle_deg=float(np.mean(angles)),
             median_angle_deg=float(np.median(angles)),
             weighted_angle_deg=float(weighted[0]),
+            mean_dihedral_deg=mean_dihed,
         )
 
     return EnsembleGeometry(
@@ -257,6 +320,7 @@ def summarize_ensemble(geometries: Sequence[AttackGeometry]) -> EnsembleGeometry
         mean_distance_A=float(np.mean(dists)),
         median_distance_A=float(np.median(dists)),
         harmonic_distance_A=h_dist,
+        mean_dihedral_deg=mean_dihed,
     )
 
 
@@ -265,29 +329,74 @@ def bootstrap_wt_delta(
     wt_poses: np.ndarray,
     n_bootstrap: int = 2000,
     seed: int = 0,
+    target_angle_deg: float | None = None,
 ) -> dict[str, float]:
-    """Independent ensemble bootstrap comparison against matched wild-type poses."""
-    var_summary = proximity_weighted_angle_and_distance(variant_poses)
-    wt_summary = proximity_weighted_angle_and_distance(wt_poses)
-    delta = var_summary - wt_summary
+    """Independent ensemble bootstrap comparison against matched wild-type poses.
+
+    Supports both:
+    - 2D ``(n_poses, 2)`` arrays of ``(distance_A, angle_deg)``, and
+    - 1D ``(n_poses,)`` (or ``(n_poses, 1)``) arrays of ``distance_A`` for
+      distance-only mechanisms (e.g., ``general_acid_base``, ``metalloenzyme_coordination``).
+
+    When ``target_angle_deg`` is provided (e.g., ``107.0`` for Bürgi-Dunitz
+    carbonyl addition or ``180.0`` for inline SN2), ``angle_improvement_fraction``
+    measures the bootstrap probability that ``|angle - target_angle_deg|``
+    decreased relative to WT, and ``delta_angle_error_deg`` reports the signed
+    change in error (negative = closer to target).
+    """
+    var_arr = np.asarray(variant_poses, dtype=float)
+    wt_arr = np.asarray(wt_poses, dtype=float)
     rng = np.random.default_rng(seed)
-    bs_var = variant_poses[rng.integers(len(variant_poses), size=(n_bootstrap, len(variant_poses)))]
-    bs_wt = wt_poses[rng.integers(len(wt_poses), size=(n_bootstrap, len(wt_poses)))]
-    bs = (
-        proximity_weighted_angle_and_distance(bs_var)
-        - proximity_weighted_angle_and_distance(bs_wt)
+
+    # Distance-only bootstrap path
+    if var_arr.ndim == 1 or (var_arr.ndim == 2 and var_arr.shape[-1] == 1):
+        vd = var_arr.reshape(-1)
+        wd = wt_arr.reshape(-1)
+        if vd.size == 0 or wd.size == 0 or np.any(vd <= 0) or np.any(wd <= 0):
+            raise ValueError("Expected non-empty positive distances for bootstrap_wt_delta")
+        v_h = float(len(vd) / np.sum(1.0 / vd))
+        w_h = float(len(wd) / np.sum(1.0 / wd))
+        bs_v = vd[rng.integers(len(vd), size=(n_bootstrap, len(vd)))]
+        bs_w = wd[rng.integers(len(wd), size=(n_bootstrap, len(wd)))]
+        bs_d = (bs_v.shape[-1] / np.sum(1.0 / bs_v, axis=-1)) - (bs_w.shape[-1] / np.sum(1.0 / bs_w, axis=-1))
+        ci = np.percentile(bs_d, [5, 95])
+        return {
+            "delta_distance_A": round(v_h - w_h, 4),
+            "delta_distance_p05": round(float(ci[0]), 4),
+            "delta_distance_p95": round(float(ci[1]), 4),
+            "distance_improvement_fraction": round(float(np.mean(bs_d < 0)), 4),
+        }
+
+    var_summary = proximity_weighted_angle_and_distance(var_arr)
+    wt_summary = proximity_weighted_angle_and_distance(wt_arr)
+    delta = var_summary - wt_summary
+    bs_var = proximity_weighted_angle_and_distance(
+        var_arr[rng.integers(len(var_arr), size=(n_bootstrap, len(var_arr)))]
     )
+    bs_wt = proximity_weighted_angle_and_distance(
+        wt_arr[rng.integers(len(wt_arr), size=(n_bootstrap, len(wt_arr)))]
+    )
+    bs = bs_var - bs_wt
     ci = np.percentile(bs, [5, 95], axis=0)
-    return {
+
+    out: dict[str, float] = {
         "delta_angle_deg": round(float(delta[0]), 4),
         "delta_distance_A": round(float(delta[1]), 4),
         "delta_angle_p05": round(float(ci[0, 0]), 4),
         "delta_angle_p95": round(float(ci[1, 0]), 4),
         "delta_distance_p05": round(float(ci[0, 1]), 4),
         "delta_distance_p95": round(float(ci[1, 1]), 4),
-        "angle_improvement_fraction": round(float(np.mean(bs[:, 0] > 0)), 4),
         "distance_improvement_fraction": round(float(np.mean(bs[:, 1] < 0)), 4),
     }
+    if target_angle_deg is not None:
+        t = float(target_angle_deg)
+        err_delta = abs(float(var_summary[0]) - t) - abs(float(wt_summary[0]) - t)
+        bs_err_delta = np.abs(bs_var[:, 0] - t) - np.abs(bs_wt[:, 0] - t)
+        out["delta_angle_error_deg"] = round(err_delta, 4)
+        out["angle_improvement_fraction"] = round(float(np.mean(bs_err_delta < 0)), 4)
+    else:
+        out["angle_improvement_fraction"] = round(float(np.mean(bs[:, 0] > 0)), 4)
+    return out
 
 
 def kabsch_fit(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -373,14 +482,30 @@ def symmetry_rmsd(
 
 def clash_fraction(
     structure: Structure,
-    protein_chain: str = "A",
+    protein_chain: str | Sequence[str] | None = None,
     cutoff_A: float = 1.5,
 ) -> float:
-    """Fraction of all heavy atoms participating in a protein-ligand clash (< ``cutoff_A``)."""
+    """Fraction of heavy atoms participating in a protein-ligand clash (< ``cutoff_A``).
+
+    When ``protein_chain`` is ``None``, checks all polymer ``ATOM`` chains against
+    all ``HETATM`` atoms so oligomeric/partner-chain clashes are also caught.
+    Pass a chain ID string or sequence of chain IDs to restrict to specific chains.
+    """
     if not structure.atoms:
         return 0.0
+    if protein_chain is None:
+        chains: set[str] | None = None
+    elif isinstance(protein_chain, str):
+        chains = {protein_chain}
+    else:
+        chains = set(protein_chain)
+
     p_coords = np.array(
-        [a.xyz for a in structure.atoms if a.record_type == "ATOM" and a.chain == protein_chain],
+        [
+            a.xyz
+            for a in structure.atoms
+            if a.record_type == "ATOM" and (chains is None or a.chain in chains)
+        ],
         dtype=float,
     )
     l_coords = np.array(
@@ -411,6 +536,12 @@ def evaluate_thresholds(
         reasons.append(f"angle {angle:.1f} deg < {thresholds.min_angle_deg:.1f} deg")
     if thresholds.max_angle_deg is not None and angle is not None and angle > thresholds.max_angle_deg:
         reasons.append(f"angle {angle:.1f} deg > {thresholds.max_angle_deg:.1f} deg")
+
+    dihed = metrics.get("mean_dihedral_deg", metrics.get("dihedral_deg"))
+    if thresholds.min_dihedral_deg is not None and dihed is not None and dihed < thresholds.min_dihedral_deg:
+        reasons.append(f"dihedral {dihed:.1f} deg < {thresholds.min_dihedral_deg:.1f} deg")
+    if thresholds.max_dihedral_deg is not None and dihed is not None and dihed > thresholds.max_dihedral_deg:
+        reasons.append(f"dihedral {dihed:.1f} deg > {thresholds.max_dihedral_deg:.1f} deg")
 
     conf = metrics.get("confidence_score_mean", metrics.get("confidence_score"))
     if thresholds.min_confidence is not None and conf is not None and conf < thresholds.min_confidence:
@@ -454,4 +585,9 @@ def evaluate_extra_thresholds(
             reasons.append(f"{spec.name}_angle {a:.1f} deg < {spec.min_angle_deg:.1f} deg")
         if spec.max_angle_deg is not None and a is not None and a > spec.max_angle_deg:
             reasons.append(f"{spec.name}_angle {a:.1f} deg > {spec.max_angle_deg:.1f} deg")
+        dh = metrics.get(f"{spec.name}_dihedral_deg")
+        if spec.min_dihedral_deg is not None and dh is not None and dh < spec.min_dihedral_deg:
+            reasons.append(f"{spec.name}_dihedral {dh:.1f} deg < {spec.min_dihedral_deg:.1f} deg")
+        if spec.max_dihedral_deg is not None and dh is not None and dh > spec.max_dihedral_deg:
+            reasons.append(f"{spec.name}_dihedral {dh:.1f} deg > {spec.max_dihedral_deg:.1f} deg")
     return reasons

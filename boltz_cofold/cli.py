@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from attack_geometry.boltz import BoltzConfig
-from attack_geometry.config import LigandSpec, PartnerChainSpec, load_config
+from attack_geometry.config import LigandSpec, NucleicAcidSpec, PartnerChainSpec, load_config
 
 from .msa import parse_fasta, prepare_msas_from_fasta
 from .predict import (
@@ -43,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pred.add_argument("--config", type=Path, default=None, help="Optional YAML/JSON config with 'boltz' section.")
     p_pred.add_argument("--diffusion-samples", type=int, default=None, help="Override diffusion samples.")
     p_pred.add_argument("--fp32", action="store_true", help="Use FP32 precision with serial sample-memory cap.")
+    p_pred.add_argument("--no-skip-existing", action="store_true", help="Re-run predictions even if complete outputs already exist.")
     p_pred.add_argument("--dry-run", action="store_true", help="Print commands without executing Boltz-2.")
 
     p_ver = sub.add_parser("verify", help="Verify cofolded structures, sequences, and confidence JSONs.")
@@ -68,12 +69,18 @@ def main(argv: list[str] | None = None) -> int:
         raw = load_config(args.config)
         ligands = [LigandSpec.from_dict(x) for x in raw.get("ligands", ())]
         partners = [PartnerChainSpec.from_dict(x) for x in raw.get("partner_chains", ())]
+        nas = [NucleicAcidSpec.from_dict(x) for x in raw.get("nucleic_acids", ())]
+        mods = [dict(x) for x in raw.get("protein_modifications", ())]
+        constraints = [dict(x) for x in raw.get("constraints", ())]
         written = batch_prepare_boltz_inputs(
             seqs,
             ligands,
             args.output_dir,
             protein_chain=args.protein_chain,
             partner_chains=partners,
+            nucleic_acids=nas,
+            protein_modifications=mods,
+            constraints=constraints,
             msa_index_tsv=args.msa_index,
         )
         sys.stdout.write(json.dumps({"n_inputs": len(written), "inputs_dir": str(args.output_dir / "boltz_inputs")}, indent=2) + "\n")
@@ -88,7 +95,13 @@ def main(argv: list[str] | None = None) -> int:
             b_dict["fp32"] = True
         b_cfg = BoltzConfig.from_dict(b_dict)
         yamls = {p.stem: p for p in sorted(args.inputs_dir.glob("*.yaml"))}
-        runs = run_cofold_batch(yamls, args.results_dir, b_cfg, dry_run=args.dry_run)
+        runs = run_cofold_batch(
+            yamls,
+            args.results_dir,
+            b_cfg,
+            dry_run=args.dry_run,
+            skip_existing=not args.no_skip_existing,
+        )
         sys.stdout.write(json.dumps({"n_jobs": len(runs), "runs": runs}, indent=2) + "\n")
         return 0
 

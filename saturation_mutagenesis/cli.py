@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from attack_geometry.boltz import BoltzConfig
-from attack_geometry.config import GeometryConfig, LigandSpec, PartnerChainSpec, load_config
+from attack_geometry.config import GeometryConfig, LigandSpec, NucleicAcidSpec, PartnerChainSpec, load_config
 from attack_geometry.mechanisms import get_mechanism, merge_mechanism_thresholds
 from attack_geometry.structure import load_structure
 
@@ -184,6 +184,9 @@ def main(argv: list[str] | None = None) -> int:
         raw = load_config(args.config)
         ligands = [LigandSpec.from_dict(x) for x in raw.get("ligands", ())]
         partners = [PartnerChainSpec.from_dict(x) for x in raw.get("partner_chains", ())]
+        nas = [NucleicAcidSpec.from_dict(x) for x in raw.get("nucleic_acids", ())]
+        mods = [dict(x) for x in raw.get("protein_modifications", ())]
+        constraints = [dict(x) for x in raw.get("constraints", ())]
         written = prepare_boltz_inputs(
             variants,
             ligands,
@@ -192,6 +195,9 @@ def main(argv: list[str] | None = None) -> int:
             msa_dir=args.msa_dir,
             msa_index_tsv=args.msa_index,
             partner_chains=partners,
+            nucleic_acids=nas,
+            protein_modifications=mods,
+            constraints=constraints,
         )
         sys.stdout.write(json.dumps({"n_inputs": len(written), "inputs_dir": str(args.output_dir / "boltz_inputs")}, indent=2) + "\n")
         return 0

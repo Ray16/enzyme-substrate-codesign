@@ -33,9 +33,10 @@ def _top_residues(freq: dict[str, Any], min_freq: float = 0.5, max_res: int = 8)
         for c in g.get("contacts", ()):
             if c["category"] in ("hydrophobic", "backbone_hbond"):
                 continue
-            key = c["res"]
+            key = (c.get("chain", ""), c["res"])
             if key not in best or c["frequency"] > best[key]["frequency"]:
                 best[key] = {
+                    "chain": c.get("chain", ""),
                     "res": c["res"],
                     "category": c["category"],
                     "frequency": c["frequency"],
@@ -138,23 +139,25 @@ def _render_pymol_active_site(
         "set sphere_scale, 0.45, metals_sel",
     ]
     rids: list[str] = []
-    for r in residues:
+    for idx_r, r in enumerate(residues):
         rid = _resid(r["res"])
         if not rid:
             continue
-        rids.append(rid)
+        chain_clause = f"chain {r['chain']} and " if r.get("chain") else ""
+        sel_name = f"r_{idx_r}_{rid}"
+        rids.append(sel_name)
         col = CAT_COLOR.get(r["category"], "#999999")
         rgb = [int(col[1:3], 16) / 255.0, int(col[3:5], 16) / 255.0, int(col[5:7], 16) / 255.0]
         pml.extend(
             [
-                f"select r{rid}, (polymer and resi {rid} and not name N+C+O)",
-                f"show sticks, r{rid}",
-                f"set_color c{rid}, [{rgb[0]:.3f},{rgb[1]:.3f},{rgb[2]:.3f}]",
-                f"color c{rid}, r{rid} and elem C",
-                f"label (polymer and resi {rid} and name CA), '{r['res']}'",
+                f"select {sel_name}, (polymer and {chain_clause}resi {rid} and not name N+C+O)",
+                f"show sticks, {sel_name}",
+                f"set_color c_{idx_r}_{rid}, [{rgb[0]:.3f},{rgb[1]:.3f},{rgb[2]:.3f}]",
+                f"color c_{idx_r}_{rid}, {sel_name} and elem C",
+                f"label (polymer and {chain_clause}resi {rid} and name CA), '{r['res']}'",
             ]
         )
-    site = "substrate_sel or metals_sel" + "".join(f" or r{rid}" for rid in rids)
+    site = "substrate_sel or metals_sel" + "".join(f" or {s}" for s in rids)
     pml.extend(
         [
             "set label_color, black",
@@ -294,11 +297,19 @@ def render_contact_figure(
 
         cats = sorted({r["category"] for r in residues})
         handles = [Patch(facecolor=CAT_COLOR[c], edgecolor="black", label=c.replace("_", " ")) for c in cats]
-        fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=9.5, frameon=False)
+        fig.legend(
+            handles=handles,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.0),
+            ncol=len(handles),
+            fontsize=9.5,
+            frameon=False,
+        )
 
-    fig.suptitle(title, fontsize=14, fontweight="bold", y=0.98)
+    fig.subplots_adjust(top=0.80 if dock_txt else 0.87, bottom=0.18)
+    fig.suptitle(title, fontsize=14, fontweight="bold", y=0.97)
     if dock_txt:
-        fig.text(0.5, 0.92, dock_txt, ha="center", va="top", fontsize=10.5, color=dock_col, fontweight="bold")
+        fig.text(0.5, 0.90, dock_txt, ha="center", va="top", fontsize=10.5, color=dock_col, fontweight="bold")
     fig.savefig(out, dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     return {
@@ -316,10 +327,20 @@ def plot_attack_geometry_summary(
     id_column: str | None = None,
     near_distance_A: float = 4.0,
     near_angle_deg: float = 150.0,
+    min_angle_deg: float | None = None,
+    max_angle_deg: float | None = None,
+    target_angle_deg: float | None = None,
     top_n: int = 25,
     title: str = "Catalytic Attack Geometry & Near-Attack Fraction",
 ) -> dict[str, Any]:
-    """Plot per-variant/design near-attack fraction and distance-vs-angle distribution."""
+    """Plot per-variant/design near-attack fraction and distance(-vs-angle) distribution.
+
+    Supports both angle-constrained mechanisms (e.g., ``inline_sn2`` with
+    ``min_angle_deg=150``, or ``carbonyl_addition`` with ``min_angle_deg=85,
+    max_angle_deg=130, target_angle_deg=107``) and distance-only mechanisms
+    (e.g., ``general_acid_base``, ``metalloenzyme_coordination``) where
+    ``angle_deg`` is absent or empty.
+    """
     try:
         import matplotlib
 
@@ -339,20 +360,50 @@ def plot_attack_geometry_summary(
         raise ValueError(f"No rows found in {pose_geometry_csv}")
 
     id_col = id_column or ("variant_id" if "variant_id" in fields else "design_id")
-    by_id: dict[str, list[tuple[float, float]]] = {}
+    has_angles = "angle_deg" in fields and all(
+        r.get("angle_deg") not in (None, "", "None") for r in rows
+    )
+    eff_min_angle = min_angle_deg if min_angle_deg is not None else near_angle_deg
+    eff_max_angle = max_angle_deg if max_angle_deg is not None else 180.0
+
+    by_id: dict[str, list[tuple[float, float | None]]] = {}
     for r in rows:
-        by_id.setdefault(r[id_col], []).append((float(r["distance_A"]), float(r["angle_deg"])))
+        d_val = float(r["distance_A"])
+        a_val = float(r["angle_deg"]) if has_angles else None
+        by_id.setdefault(r[id_col], []).append((d_val, a_val))
 
     stats = []
     for ident, pairs in by_id.items():
-        arr = np.asarray(pairs, dtype=float)
-        d, a = arr[:, 0], arr[:, 1]
-        nac = float(np.mean((d < near_distance_A) & (a > near_angle_deg)))
-        w_ang = float(np.sum(a / d) / np.sum(1.0 / d))
+        d = np.asarray([p[0] for p in pairs], dtype=float)
         h_dist = float(len(d) / np.sum(1.0 / d))
-        stats.append({"id": ident, "nac": nac, "weighted_angle_deg": w_ang, "harmonic_distance_A": h_dist, "n": len(d)})
+        if has_angles:
+            a = np.asarray([float(p[1]) for p in pairs], dtype=float)
+            nac = float(np.mean((d <= near_distance_A) & (a >= eff_min_angle) & (a <= eff_max_angle)))
+            w_ang = float(np.sum(a / d) / np.sum(1.0 / d))
+            ang_score = -abs(w_ang - target_angle_deg) if target_angle_deg is not None else w_ang
+            stats.append(
+                {
+                    "id": ident,
+                    "nac": nac,
+                    "weighted_angle_deg": w_ang,
+                    "angle_score": ang_score,
+                    "harmonic_distance_A": h_dist,
+                    "n": len(d),
+                }
+            )
+        else:
+            nac = float(np.mean(d <= near_distance_A))
+            stats.append(
+                {
+                    "id": ident,
+                    "nac": nac,
+                    "angle_score": 0.0,
+                    "harmonic_distance_A": h_dist,
+                    "n": len(d),
+                }
+            )
 
-    stats.sort(key=lambda s: (s["nac"], s["weighted_angle_deg"], -s["harmonic_distance_A"]))
+    stats.sort(key=lambda s: (s["nac"], s["angle_score"], -s["harmonic_distance_A"]))
     shown = stats[-top_n:]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, max(4.2, 0.34 * len(shown) + 1.8)))
@@ -362,19 +413,38 @@ def plot_attack_geometry_summary(
     ax1.set_yticks(y)
     ax1.set_yticklabels([s["id"] for s in shown], fontsize=9)
     ax1.set_xlim(0, 1.05)
-    ax1.set_xlabel(f"Near-attack fraction (d < {near_distance_A:.1f} A & angle > {near_angle_deg:.0f} deg)")
+    if has_angles:
+        ang_lbl = (
+            f"{eff_min_angle:.0f}–{eff_max_angle:.0f} deg"
+            if max_angle_deg is not None
+            else f"> {eff_min_angle:.0f} deg"
+        )
+        ax1.set_xlabel(f"Near-attack fraction (d <= {near_distance_A:.1f} A & angle {ang_lbl})")
+    else:
+        ax1.set_xlabel(f"Near-attack fraction (d <= {near_distance_A:.1f} A)")
     ax1.set_title("Ranked near-attack fraction")
     for sp in ("top", "right"):
         ax1.spines[sp].set_visible(False)
 
     all_d = [float(r["distance_A"]) for r in rows]
-    all_a = [float(r["angle_deg"]) for r in rows]
-    ax2.scatter(all_d, all_a, alpha=0.65, s=26, color="#2166ac", edgecolors="white", linewidth=0.4)
-    ax2.axvline(near_distance_A, ls="--", color="#b23024", lw=1.0)
-    ax2.axhline(near_angle_deg, ls="--", color="#b23024", lw=1.0)
-    ax2.set_xlabel("Nucleophile-electrophile distance (A)")
-    ax2.set_ylabel("Attack angle (deg)")
-    ax2.set_title("Per-pose attack geometry")
+    if has_angles:
+        all_a = [float(r["angle_deg"]) for r in rows]
+        ax2.scatter(all_d, all_a, alpha=0.65, s=26, color="#2166ac", edgecolors="white", linewidth=0.4)
+        ax2.axvline(near_distance_A, ls="--", color="#b23024", lw=1.0)
+        ax2.axhline(eff_min_angle, ls="--", color="#b23024", lw=1.0)
+        if max_angle_deg is not None:
+            ax2.axhline(eff_max_angle, ls="--", color="#b23024", lw=1.0)
+        if target_angle_deg is not None:
+            ax2.axhline(target_angle_deg, ls=":", color="#1b7837", lw=1.2)
+        ax2.set_xlabel("Catalytic distance (A)")
+        ax2.set_ylabel("Attack angle (deg)")
+        ax2.set_title("Per-pose attack geometry")
+    else:
+        ax2.hist(all_d, bins=min(20, max(5, len(all_d) // 2)), color="#2166ac", edgecolor="white", alpha=0.8)
+        ax2.axvline(near_distance_A, ls="--", color="#b23024", lw=1.2)
+        ax2.set_xlabel("Catalytic distance (A)")
+        ax2.set_ylabel("Pose count")
+        ax2.set_title("Per-pose catalytic distance distribution")
     for sp in ("top", "right"):
         ax2.spines[sp].set_visible(False)
 
@@ -396,6 +466,8 @@ def write_contact_report(
     min_freq: float = 0.5,
     pymol_bin: str | None = None,
     render_figure: bool = True,
+    substrate_chains: Sequence[str] | None = None,
+    cofactor_chains: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Export standardized JSON, CSV, Markdown, and PNG contact analysis artifacts."""
     out = Path(output_dir).expanduser()
@@ -457,6 +529,8 @@ def write_contact_report(
                 title=f"{name} — Active-Site Substrate Contacts",
                 min_freq=min_freq,
                 pymol_bin=pymol_bin,
+                substrate_chains=substrate_chains,
+                cofactor_chains=cofactor_chains,
             )
         except ImportError as exc:
             fig_info = {"skipped": str(exc)}

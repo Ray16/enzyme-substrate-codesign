@@ -137,6 +137,57 @@ MECHANISMS: dict[str, MechanismSpec] = {
             "coordination distances (typically 2.0-2.6 A) alongside protein ligand geometry."
         ),
     ),
+    "hydride_transfer": MechanismSpec(
+        name="hydride_transfer",
+        description=(
+            "Direct hydride transfer between NAD(P)H or flavin (FAD/FMN) cofactors "
+            "and a prochiral carbonyl/imine/alkene substrate (oxidoreductases)."
+        ),
+        target_angle_deg=110.0,
+        default_rank_by="distance",
+        default_thresholds=ThresholdConfig(
+            max_distance_A=3.8,
+            min_angle_deg=85.0,
+            max_angle_deg=140.0,
+        ),
+        recommended_descriptors=(
+            "cofactor_C4_substrate_C_distance_A",
+            "hydride_approach_angle_deg",
+            "prochiral_face_dihedral_deg",
+            "proton_donor_distance_A",
+            "clash_fraction",
+        ),
+        modeling_notes=(
+            "Select cofactor donor atom (e.g., NAD C4N / FAD N5) as donor, substrate "
+            "acceptor carbon as electrophile, carbonyl O (or substituent) as leaving, "
+            "and a second substituent as dihedral_ref to enforce Re/Si stereoselectivity."
+        ),
+    ),
+    "covalent_catalysis": MechanismSpec(
+        name="covalent_catalysis",
+        description=(
+            "Covalent intermediate or cofactor-linked catalysis (e.g., PLP aldimine, "
+            "acyl-enzyme, Schiff-base aldolase, heme-thiolate) using optional Boltz-2 "
+            "covalent bond constraints."
+        ),
+        target_angle_deg=None,
+        default_rank_by="distance",
+        default_thresholds=ThresholdConfig(
+            max_distance_A=3.5,
+            min_angle_deg=None,
+            max_angle_deg=None,
+        ),
+        recommended_descriptors=(
+            "catalytic_atom_distance_A",
+            "general_acid_base_distance_A",
+            "clash_fraction",
+        ),
+        modeling_notes=(
+            "Use Boltz-2 `constraints` (bond) to model covalent enzyme-cofactor or "
+            "enzyme-substrate intermediates, and track catalytic acid/base proximity "
+            "via primary geometry and extra_metrics."
+        ),
+    ),
     "custom": MechanismSpec(
         name="custom",
         description="User-defined reaction mechanism with explicit geometry, thresholds, and ranking.",

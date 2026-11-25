@@ -68,7 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_pg.add_argument("--pose-geometry-csv", type=Path, required=True, help="pose_geometry.csv from saturation or partial diffusion.")
     p_pg.add_argument("--out", type=Path, required=True, help="Output PNG path.")
     p_pg.add_argument("--near-distance", type=float, default=4.0, help="Near-attack distance cutoff in Å (default: 4.0).")
-    p_pg.add_argument("--near-angle", type=float, default=150.0, help="Near-attack angle cutoff in deg (default: 150.0).")
+    p_pg.add_argument("--near-angle", type=float, default=150.0, help="Lower near-attack angle bound in deg (default: 150.0).")
+    p_pg.add_argument("--max-angle", type=float, default=None, help="Optional upper near-attack angle bound in deg (e.g., 130 for Bürgi-Dunitz).")
+    p_pg.add_argument("--target-angle", type=float, default=None, help="Optional target angle in deg (e.g., 107 for carbonyl addition, 180 for SN2).")
     p_pg.add_argument("--title", default="Catalytic Attack Geometry & Near-Attack Fraction", help="Figure title.")
 
     # 6. report (end-to-end)
@@ -197,18 +199,22 @@ def main(argv: list[str] | None = None) -> int:
             args.out,
             near_distance_A=args.near_distance,
             near_angle_deg=args.near_angle,
+            max_angle_deg=args.max_angle,
+            target_angle_deg=args.target_angle,
             title=args.title,
         )
         sys.stdout.write(json.dumps(res, indent=2) + "\n")
         return 0
 
     if args.command == "report":
+        sub_chains = _split_csv_arg(args.substrate_chains)
+        cof_chains = _split_csv_arg(args.cofactor_chains)
         poses = _collect_poses(args.pose_dir, args.poses_json)
         freq = analyze_ensemble(
             poses,
             protein_chain=args.protein_chain,
-            substrate_chains=_split_csv_arg(args.substrate_chains),
-            cofactor_chains=_split_csv_arg(args.cofactor_chains),
+            substrate_chains=sub_chains,
+            cofactor_chains=cof_chains,
         )
         rep_pose = args.representative_pose or (poses[0] if poses else None)
         res = write_contact_report(
@@ -218,6 +224,8 @@ def main(argv: list[str] | None = None) -> int:
             pose_path=rep_pose,
             pymol_bin=args.pymol_bin,
             render_figure=not args.no_figure,
+            substrate_chains=sub_chains,
+            cofactor_chains=cof_chains,
         )
         sys.stdout.write(json.dumps(res, indent=2) + "\n")
         return 0

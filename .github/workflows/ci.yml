@@ -33,3 +33,5 @@ jobs:
         run: pytest -v
       - name: Run offline end-to-end demo
         run: python examples/run_offline_demo.py --out-dir /tmp/demo_out
+      - name: Verify example figure generation
+        run: python examples/generate_example_figures.py --out-dir /tmp/example_figs

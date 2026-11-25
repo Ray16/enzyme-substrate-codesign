@@ -8,7 +8,6 @@ without requiring Biopython.
 from __future__ import annotations
 
 import gzip
-import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -141,6 +140,27 @@ class Structure:
             )
         return "".join(r.aa1 for r in rs)
 
+    def residue_index_map(self, chain: str | None = None) -> dict[int, tuple[int, str]]:
+        """Map PDB ``resnum -> (1-based sequential index, aa1)`` for a protein chain.
+
+        Useful for experimental crystal structures with N-terminal offsets or missing
+        internal loops where PDB numbering does not start at 1. Raises if duplicate
+        residue numbers (e.g., insertion codes) collide on the same chain.
+        """
+        chain = chain or (self.protein_chains() or ("",))[0]
+        rs = [r for r in self.residues if r.chain == chain]
+        if not rs:
+            raise ValueError(f"{self.path}: no protein residues in chain {chain!r}")
+        mapping: dict[int, tuple[int, str]] = {}
+        for idx, r in enumerate(rs, start=1):
+            if r.resnum in mapping:
+                raise ValueError(
+                    f"{self.path}: chain {chain!r} has duplicate residue number {r.resnum} "
+                    f"(insertion code {r.icode!r}); cannot map unambiguously by resnum alone"
+                )
+            mapping[r.resnum] = (idx, r.aa1)
+        return mapping
+
     def atom_map(self, chain: str | None = None) -> dict[tuple[int, str], np.ndarray]:
         """Map ``(1-based sequential index, atom_name) -> xyz`` for a protein chain."""
         chain = chain or (self.protein_chains() or ("",))[0]
@@ -228,6 +248,42 @@ def _parse_pdb_atoms(text: str, keep_water: bool) -> list[AtomRecord]:
     return atoms
 
 
+def _tokenize_mmcif_line(line: str) -> list[str]:
+    """Spec-compliant mmCIF single-line tokenizer.
+
+    Unlike ``shlex.split``, treats ``'`` or ``"`` as string delimiters ONLY when
+    they open a token and close before whitespace or end-of-line. This correctly
+    preserves unquoted ribose/sugar prime atom names such as ``C1'``, ``O2'``,
+    and ``O5'`` found in ATP, NAD, FAD, CoA, SAM, and nucleic acids.
+    """
+    tokens: list[str] = []
+    n = len(line)
+    i = 0
+    while i < n:
+        while i < n and line[i].isspace():
+            i += 1
+        if i >= n or line[i] == "#":
+            break
+        ch = line[i]
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            start = i
+            while i < n:
+                if line[i] == quote and (i + 1 == n or line[i + 1].isspace()):
+                    break
+                i += 1
+            tokens.append(line[start:i])
+            if i < n and line[i] == quote:
+                i += 1
+        else:
+            start = i
+            while i < n and not line[i].isspace():
+                i += 1
+            tokens.append(line[start:i])
+    return tokens
+
+
 def _parse_mmcif_atoms(text: str, keep_water: bool) -> list[AtomRecord]:
     """Lightweight pure-Python mmCIF ``_atom_site`` loop parser (model 1)."""
     lines = text.splitlines()
@@ -265,12 +321,12 @@ def _parse_mmcif_atoms(text: str, keep_water: bool) -> list[AtomRecord]:
             reading_rows = True
             if raw.startswith("_") or raw == "loop_" or raw.startswith("data_"):
                 break
-            tokens = shlex.split(raw)
+            tokens = _tokenize_mmcif_line(raw)
             while len(tokens) < len(columns) and i < n_lines:
                 nxt = lines[i].strip()
                 i += 1
                 if nxt and not nxt.startswith("#"):
-                    tokens.extend(shlex.split(nxt))
+                    tokens.extend(_tokenize_mmcif_line(nxt))
             if len(tokens) >= len(columns):
                 rows.append(tokens[: len(columns)])
         elif reading_rows:

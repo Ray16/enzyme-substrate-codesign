@@ -45,6 +45,21 @@ HBOND_DONOR_RES: dict[str, tuple[str, ...]] = {
     "CYS": ("SG",),
 }
 
+HBOND_ACCEPTOR_RES: dict[str, tuple[str, ...]] = {
+    "SER": ("OG",),
+    "THR": ("OG1",),
+    "TYR": ("OH",),
+    "ASN": ("OD1",),
+    "GLN": ("OE1",),
+    "HIS": ("ND1", "NE2"),
+    "HIE": ("ND1", "NE2"),
+    "HID": ("ND1", "NE2"),
+    "HSE": ("ND1", "NE2"),
+    "HSD": ("ND1", "NE2"),
+    "ASP": ("OD1", "OD2"),
+    "GLU": ("OE1", "OE2"),
+}
+
 ACIDIC_ATOMS: dict[str, tuple[str, ...]] = {
     "ASP": ("OD1", "OD2"),
     "GLU": ("OE1", "OE2"),
@@ -57,6 +72,14 @@ HYDROPHOBIC_ATOMS: tuple[str, ...] = (
 METAL_ELEMENTS = frozenset({
     "MG", "MN", "ZN", "CA", "FE", "NI", "CO", "CU",
     "NA", "K", "CD", "MO", "W", "V", "SE",
+})
+
+COMMON_COFACTOR_RESNAMES = frozenset({
+    "ATP", "ADP", "AMP", "ANP", "ACP", "GTP", "GDP", "GMP", "GNP",
+    "NAD", "NAH", "NAI", "NAP", "NDP", "FAD", "FMN",
+    "HEM", "HEC", "HEA", "HEB", "SAM", "SAH",
+    "COA", "ACO", "PLP", "PMP", "TPP", "THF", "BTN", "B12",
+    "SF4", "FES", "F3S",
 })
 
 SALT_CUT_A = 4.0
@@ -100,7 +123,9 @@ def split_ligands(
     metals: list[AtomRecord] = []
     substrate: list[AtomRecord] = []
 
-    for (chain, resname, _resnum), atoms in sorted(groups.items()):
+    organic_groups: list[tuple[tuple[str, str, int], list[AtomRecord]]] = []
+    for key, atoms in sorted(groups.items()):
+        chain, resname, _resnum = key
         if chain in sub_ch or resname in sub_rn:
             substrate.extend(atoms)
             continue
@@ -111,12 +136,19 @@ def split_ligands(
         if elems <= METAL_ELEMENTS:
             metals.extend(atoms)
             continue
+        organic_groups.append((key, atoms))
+
+    n_organic = len(organic_groups) + (1 if substrate else 0)
+    for (_chain, resname, _resnum), atoms in organic_groups:
+        if resname in COMMON_COFACTOR_RESNAMES or bool({a.name for a in atoms} & {"PA", "PB", "PG"}):
+            cofactor.extend(atoms)
+            continue
         p_atoms = [a for a in atoms if a.element.upper() == "P"]
         o_atoms = [a for a in atoms if a.element.upper() == "O"]
-        is_phospho_cofactor = (
-            any(len(_bonded(p, o_atoms)) >= 3 for p in p_atoms) and len(atoms) > 6
-        ) or bool({a.name for a in atoms} & {"PA", "PB", "PG"})
-        if is_phospho_cofactor:
+        is_phospho = any(len(_bonded(p, o_atoms)) >= 3 for p in p_atoms) and len(atoms) > 6
+        # Only auto-assign an unannotated phosphorylated molecule as a cofactor when
+        # another organic substrate is also present; otherwise treat it as a phosphorylated substrate.
+        if is_phospho and n_organic > 1:
             cofactor.extend(atoms)
         else:
             substrate.extend(atoms)
@@ -125,7 +157,13 @@ def split_ligands(
 
 
 def detect_functional_groups(substrate_atoms: Sequence[AtomRecord]) -> list[dict[str, Any]]:
-    """Detect substrate functional groups and formal charge sign from covalent geometry."""
+    """Detect substrate functional groups and formal charge sign from covalent geometry.
+
+    Distinguishes carboxylates (terminal C(=O)O-, charge -1) from esters/lactones/acetals
+    (C(=O)-O-C, charge 0), ketones/aldehydes (C=O, <= 1.30 A) from hydroxyls (C-OH),
+    amides/nitro/aromatic nitrogens (charge 0) from aliphatic amines (charge +1),
+    phosphates (charge -1), and thiols/thioethers (charge 0).
+    """
     c_atoms = [a for a in substrate_atoms if a.element.upper() == "C"]
     o_atoms = [a for a in substrate_atoms if a.element.upper() == "O"]
     n_atoms = [a for a in substrate_atoms if a.element.upper() == "N"]
@@ -133,42 +171,62 @@ def detect_functional_groups(substrate_atoms: Sequence[AtomRecord]) -> list[dict
     p_atoms = [a for a in substrate_atoms if a.element.upper() == "P"]
 
     groups: list[dict[str, Any]] = []
-    carbox_o_keys: set[tuple[str, int, str]] = set()
+    assigned_o_keys: set[tuple[str, int, str]] = set()
+    carbonyl_c_keys: set[tuple[str, int, str]] = set()
 
     for c in c_atoms:
         bo = _bonded(c, o_atoms)
         if len(bo) >= 2:
-            groups.append({"kind": "carboxylate", "charge": -1, "atoms": [c, *bo], "center": c})
+            # Check if any bonded oxygen bridges to another carbon (ester/lactone/carbonate/acetal)
+            has_bridging_o = any(len(_bonded(o, c_atoms)) >= 2 for o in bo)
+            if has_bridging_o:
+                groups.append({"kind": "ester", "charge": 0, "atoms": [c, *bo], "center": c})
+            else:
+                groups.append({"kind": "carboxylate", "charge": -1, "atoms": [c, *bo], "center": c})
+            carbonyl_c_keys.add((c.chain, c.resnum, c.name))
             for o in bo:
-                carbox_o_keys.add((o.chain, o.resnum, o.name))
+                assigned_o_keys.add((o.chain, o.resnum, o.name))
+        elif len(bo) == 1:
+            d_co = float(np.linalg.norm(c.xyz - bo[0].xyz))
+            if d_co <= 1.30:
+                carbonyl_c_keys.add((c.chain, c.resnum, c.name))
+                groups.append({"kind": "carbonyl", "charge": 0, "atoms": [c, bo[0]], "center": c})
+                assigned_o_keys.add((bo[0].chain, bo[0].resnum, bo[0].name))
 
     for p in p_atoms:
         bo = _bonded(p, o_atoms)
         if len(bo) >= 3:
             groups.append({"kind": "phosphate", "charge": -1, "atoms": [p, *bo], "center": p})
+            for o in bo:
+                assigned_o_keys.add((o.chain, o.resnum, o.name))
 
-    carbonyl_c_keys = {
-        (c.chain, c.resnum, c.name)
-        for c in c_atoms
-        if len(_bonded(c, o_atoms)) == 1
-    }
     for n in n_atoms:
         bc = _bonded(n, c_atoms)
+        bo = _bonded(n, o_atoms)
+        if bo:
+            groups.append({"kind": "nitro", "charge": 0, "atoms": [n, *bo], "center": n})
+            continue
         is_amide = any((c.chain, c.resnum, c.name) in carbonyl_c_keys for c in bc)
-        groups.append(
-            {
-                "kind": "amide_N" if is_amide else "amine",
-                "charge": 0 if is_amide else 1,
-                "atoms": [n],
-                "center": n,
-            }
+        is_aromatic_or_sp2 = (
+            len(bc) >= 2
+            and all(float(np.linalg.norm(n.xyz - c.xyz)) <= 1.39 for c in bc)
         )
+        if is_amide:
+            kind, charge = "amide_N", 0
+        elif is_aromatic_or_sp2:
+            kind, charge = "aromatic_N", 0
+        else:
+            kind, charge = "amine", 1
+        groups.append({"kind": kind, "charge": charge, "atoms": [n], "center": n})
 
     for o in o_atoms:
-        if (o.chain, o.resnum, o.name) in carbox_o_keys:
+        if (o.chain, o.resnum, o.name) in assigned_o_keys:
             continue
-        if len(_bonded(o, c_atoms)) == 1 and not _bonded(o, p_atoms):
+        bc = _bonded(o, c_atoms)
+        if len(bc) == 1 and not _bonded(o, p_atoms):
             groups.append({"kind": "hydroxyl", "charge": 0, "atoms": [o], "center": o})
+        elif len(bc) >= 2 and not _bonded(o, p_atoms):
+            groups.append({"kind": "ether", "charge": 0, "atoms": [o], "center": o})
 
     for s in s_atoms:
         groups.append({"kind": "thiol", "charge": 0, "atoms": [s], "center": s})
@@ -214,7 +272,12 @@ def _classify_residue(
         d = _d(HBOND_DONOR_RES[resname])
         if d <= HBOND_CUT_A:
             return "h_bond", d
-    dn = _d(("N",))
+    if target_charge >= 0 and resname in HBOND_ACCEPTOR_RES:
+        d = _d(HBOND_ACCEPTOR_RES[resname])
+        if d <= HBOND_CUT_A:
+            return "h_bond", d
+    bb_atoms = ("N", "O") if target_charge >= 0 else ("N",)
+    dn = _d(bb_atoms)
     if dn <= HBOND_CUT_A:
         return "backbone_hbond", dn
     dc = _d(HYDROPHOBIC_ATOMS)
@@ -365,7 +428,7 @@ def analyze_ensemble(
     for fr in frames:
         for grp in fr["groups"]:
             gk = f"{grp['role']}:{grp['kind']}"
-            for key in {(c["res"], c["category"]) for c in grp["contacts"]}:
+            for key in {(c["chain"], c["res"], c["category"]) for c in grp["contacts"]}:
                 gc[gk][key] += 1
             if grp["metal_coordinated"]:
                 gmc[gk] += 1
@@ -376,8 +439,8 @@ def analyze_ensemble(
     for gk in sorted(set(gc) | set(gmc) | set(gd)):
         out_groups[gk] = {
             "contacts": [
-                {"res": res, "category": cat, "frequency": round(count / n, 3), "count": count}
-                for (res, cat), count in sorted(gc[gk].items(), key=lambda kv: (-kv[1], kv[0]))
+                {"chain": ch, "res": res, "category": cat, "frequency": round(count / n, 3), "count": count}
+                for (ch, res, cat), count in sorted(gc[gk].items(), key=lambda kv: (-kv[1], kv[0]))
             ],
             "metal_coordination_freq": round(gmc[gk] / n, 3),
             "d_to_center_A_mean": round(float(np.mean(gd[gk])), 2) if gd[gk] else None,

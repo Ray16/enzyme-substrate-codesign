@@ -84,21 +84,25 @@ class AtomSelector:
 
 @dataclass(frozen=True)
 class ExtraMetricSpec:
-    """Additional named catalytic distance or 3-atom angle descriptor."""
+    """Additional named catalytic distance, 3-atom angle, or 4-atom signed dihedral descriptor."""
 
     name: str
     donor: AtomSelector
     electrophile: AtomSelector
     leaving: AtomSelector | None = None
+    dihedral_ref: AtomSelector | None = None
     max_distance_A: float | None = None
     min_angle_deg: float | None = None
     max_angle_deg: float | None = None
+    min_dihedral_deg: float | None = None
+    max_dihedral_deg: float | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ExtraMetricSpec":
         donor_raw = data.get("donor", data.get("atom_a", data.get("attack_candidates")))
         elec_raw = data.get("electrophile", data.get("atom_b", data.get("center")))
         leaving_raw = data.get("leaving", data.get("atom_c", data.get("angle_reference")))
+        dihed_raw = data.get("dihedral_ref", data.get("atom_d", data.get("dihedral_reference")))
         if not data.get("name") or donor_raw is None or elec_raw is None:
             raise ValueError(
                 f"ExtraMetricSpec requires 'name', 'donor'/'atom_a', and 'electrophile'/'atom_b': {data}"
@@ -108,9 +112,12 @@ class ExtraMetricSpec:
             donor=AtomSelector.from_dict(donor_raw),
             electrophile=AtomSelector.from_dict(elec_raw),
             leaving=AtomSelector.from_dict(leaving_raw) if leaving_raw is not None else None,
+            dihedral_ref=AtomSelector.from_dict(dihed_raw) if dihed_raw is not None else None,
             max_distance_A=float(data["max_distance_A"]) if data.get("max_distance_A") is not None else None,
             min_angle_deg=float(data["min_angle_deg"]) if data.get("min_angle_deg") is not None else None,
             max_angle_deg=float(data["max_angle_deg"]) if data.get("max_angle_deg") is not None else None,
+            min_dihedral_deg=float(data["min_dihedral_deg"]) if data.get("min_dihedral_deg") is not None else None,
+            max_dihedral_deg=float(data["max_dihedral_deg"]) if data.get("max_dihedral_deg") is not None else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -121,12 +128,18 @@ class ExtraMetricSpec:
         }
         if self.leaving is not None:
             out["leaving"] = self.leaving.to_dict()
+        if self.dihedral_ref is not None:
+            out["dihedral_ref"] = self.dihedral_ref.to_dict()
         if self.max_distance_A is not None:
             out["max_distance_A"] = self.max_distance_A
         if self.min_angle_deg is not None:
             out["min_angle_deg"] = self.min_angle_deg
         if self.max_angle_deg is not None:
             out["max_angle_deg"] = self.max_angle_deg
+        if self.min_dihedral_deg is not None:
+            out["min_dihedral_deg"] = self.min_dihedral_deg
+        if self.max_dihedral_deg is not None:
+            out["max_dihedral_deg"] = self.max_dihedral_deg
         return out
 
 
@@ -134,19 +147,24 @@ class ExtraMetricSpec:
 class GeometryConfig:
     """Configurable catalytic geometry definition.
 
-    Defines two or three primary atom selections plus optional auxiliary metrics
-    (e.g., oxyanion-hole H-bond distance, catalytic-base distance, metal bridge):
-    - ``donor`` (or ``attack_candidates``): one or more candidate atoms; the
-      nearest atom to ``electrophile`` is selected (deterministic tie-break).
-    - ``electrophile`` (or ``center``): the single reference/target atom.
-    - ``leaving`` (or ``angle_reference``, optional): a single reference atom
-      defining the 3-atom angle ``donor_best -- electrophile -- leaving``.
+    Defines two, three, or four primary atom selections plus optional auxiliary
+    metrics (e.g., oxyanion-hole H-bond distance, catalytic-base distance,
+    metal coordination, or prochiral dihedral):
+    - ``donor`` (or ``attack_candidates``): one or more candidate atoms.
+    - ``electrophile`` (or ``center``): one or more target atoms; the closest
+      ``(donor, electrophile)`` pair is selected (supporting symmetric substrates).
+    - ``leaving`` (or ``angle_reference``, optional): one or more reference atoms
+      defining the 3-atom angle ``donor_best -- electrophile_best -- leaving``.
       Omit for distance-only catalytic geometry evaluation.
+    - ``dihedral_ref`` (or ``dihedral_reference``, optional): fourth atom defining
+      the signed 4-atom dihedral ``donor -- electrophile -- leaving -- dihedral_ref``
+      (in ``[-180, 180]`` deg) for stereoselective / prochiral face analysis.
     """
 
     donor: AtomSelector
     electrophile: AtomSelector
     leaving: AtomSelector | None = None
+    dihedral_ref: AtomSelector | None = None
     clash_cutoff_A: float = 1.5
     extra_metrics: tuple[ExtraMetricSpec, ...] = ()
 
@@ -155,6 +173,7 @@ class GeometryConfig:
         donor_raw = data.get("donor", data.get("attack_candidates"))
         elec_raw = data.get("electrophile", data.get("center"))
         leaving_raw = data.get("leaving", data.get("angle_reference"))
+        dihed_raw = data.get("dihedral_ref", data.get("dihedral_reference"))
         if donor_raw is None or elec_raw is None:
             raise ValueError(
                 "GeometryConfig requires 'donor'/'attack_candidates' and "
@@ -176,6 +195,7 @@ class GeometryConfig:
             donor=donor,
             electrophile=AtomSelector.from_dict(elec_raw),
             leaving=AtomSelector.from_dict(leaving_raw) if leaving_raw is not None else None,
+            dihedral_ref=AtomSelector.from_dict(dihed_raw) if dihed_raw is not None else None,
             clash_cutoff_A=float(data.get("clash_cutoff_A", 1.5)),
             extra_metrics=extras,
         )
@@ -188,6 +208,8 @@ class GeometryConfig:
         }
         if self.leaving is not None:
             out["leaving"] = self.leaving.to_dict()
+        if self.dihedral_ref is not None:
+            out["dihedral_ref"] = self.dihedral_ref.to_dict()
         if self.extra_metrics:
             out["extra_metrics"] = [m.to_dict() for m in self.extra_metrics]
         return out
@@ -200,6 +222,8 @@ class ThresholdConfig:
     max_distance_A: float | None = 4.0
     min_angle_deg: float | None = 120.0
     max_angle_deg: float | None = 180.0
+    min_dihedral_deg: float | None = None
+    max_dihedral_deg: float | None = None
     min_confidence: float | None = None
     min_iptm: float | None = None
     min_ligand_iptm: float | None = None
@@ -221,6 +245,8 @@ class ThresholdConfig:
             max_distance_A=_opt_float("max_distance_A", 4.0),
             min_angle_deg=_opt_float("min_angle_deg", 120.0),
             max_angle_deg=_opt_float("max_angle_deg", 180.0),
+            min_dihedral_deg=_opt_float("min_dihedral_deg", None),
+            max_dihedral_deg=_opt_float("max_dihedral_deg", None),
             min_confidence=_opt_float("min_confidence", None),
             min_iptm=_opt_float("min_iptm", None),
             min_ligand_iptm=_opt_float("min_ligand_iptm", None),
@@ -263,22 +289,78 @@ class LigandSpec:
 
 @dataclass(frozen=True)
 class PartnerChainSpec:
-    """Additional protein chain for oligomeric / multi-subunit Boltz-2 co-folding."""
+    """Additional protein chain for oligomeric / multi-subunit Boltz-2 co-folding.
+
+    Set ``homomer=True`` (or ``tied_to_target=True``) for homo-oligomers
+    (homodimers, homotetramers) so that mutations or designs applied to the
+    primary enzyme chain automatically propagate to this subunit (along with
+    its MSA if ``msa_path`` is not explicitly overridden).
+    """
 
     id: str
-    sequence: str
+    sequence: str = ""
     msa_path: str | None = None
+    homomer: bool = False
+    modifications: tuple[dict[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.homomer and not self.sequence:
+            raise ValueError(
+                f"PartnerChainSpec({self.id!r}) requires 'sequence' unless homomer=True."
+            )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PartnerChainSpec":
+        homomer = bool(data.get("homomer", data.get("tied_to_target", False)))
+        seq = str(data.get("sequence", "")).strip().upper()
+        mods = tuple(dict(m) for m in (data.get("modifications") or ()))
         return cls(
             id=str(data["id"]),
-            sequence=str(data["sequence"]).strip().upper(),
+            sequence=seq,
             msa_path=str(data["msa_path"]) if data.get("msa_path") else None,
+            homomer=homomer,
+            modifications=mods,
+        )
+
+    def to_boltz_entry(
+        self,
+        *,
+        target_sequence: str | None = None,
+        target_msa_path: str | Path | None = None,
+    ) -> dict[str, Any]:
+        seq = target_sequence if (self.homomer and target_sequence) else self.sequence
+        if not seq:
+            raise ValueError(f"PartnerChainSpec({self.id!r}) resolved to an empty sequence.")
+        payload: dict[str, Any] = {"id": self.id, "sequence": seq}
+        eff_msa = self.msa_path if self.msa_path is not None else (target_msa_path if self.homomer else None)
+        if eff_msa:
+            payload["msa"] = str(Path(eff_msa).expanduser().resolve())
+        if self.modifications:
+            payload["modifications"] = [dict(m) for m in self.modifications]
+        return {"protein": payload}
+
+
+@dataclass(frozen=True)
+class NucleicAcidSpec:
+    """DNA or RNA polymer chain for Boltz-2 co-folding (e.g., nucleases, polymerases)."""
+
+    id: str
+    kind: str  # "dna" or "rna"
+    sequence: str
+
+    def __post_init__(self) -> None:
+        if self.kind.lower() not in ("dna", "rna"):
+            raise ValueError(f"NucleicAcidSpec({self.id!r}) kind must be 'dna' or 'rna', got {self.kind!r}")
+        if not self.sequence:
+            raise ValueError(f"NucleicAcidSpec({self.id!r}) requires a non-empty sequence.")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "NucleicAcidSpec":
+        return cls(
+            id=str(data["id"]),
+            kind=str(data.get("kind", data.get("type", "dna"))).lower(),
+            sequence=str(data["sequence"]).strip().upper(),
         )
 
     def to_boltz_entry(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"id": self.id, "sequence": self.sequence}
-        if self.msa_path:
-            payload["msa"] = str(Path(self.msa_path).expanduser().resolve())
-        return {"protein": payload}
+        return {self.kind.lower(): {"id": self.id, "sequence": self.sequence}}

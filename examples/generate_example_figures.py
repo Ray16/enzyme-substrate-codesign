@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from contact_analysis.substrate_contacts import analyze_ensemble
 from contact_analysis.visualize import plot_attack_geometry_summary, render_contact_figure
 
 
@@ -98,47 +99,38 @@ def _generate_hydrolase_figure(out_png: Path, work_dir: Path) -> dict:
     )
 
 
-def _generate_contacts_figure(out_png: Path) -> dict:
-    """Render an example ensemble active-site contact frequency figure."""
-    freq = {
-        "source": "boltz_pose_ensemble",
-        "n_structures": 20,
-        "n_failed": 0,
-        "groups": {
-            "reactive:carboxylate": {
-                "contacts": [
-                    {"chain": "A", "res": "LYS143", "category": "salt_bridge", "frequency": 0.95, "count": 19},
-                    {"chain": "A", "res": "SER190", "category": "h_bond", "frequency": 0.90, "count": 18},
-                    {"chain": "A", "res": "THR192", "category": "h_bond", "frequency": 0.75, "count": 15},
-                    {"chain": "A", "res": "HIS211", "category": "h_bond", "frequency": 0.60, "count": 12},
-                ],
-                "metal_coordination_freq": 0.90,
-                "d_to_center_A_mean": 3.12,
-                "d_to_center_A_std": 0.19,
-            },
-            "secondary:carboxylate": {
-                "contacts": [
-                    {"chain": "A", "res": "ARG215", "category": "salt_bridge", "frequency": 1.00, "count": 20},
-                    {"chain": "A", "res": "TYR244", "category": "h_bond", "frequency": 0.85, "count": 17},
-                    {"chain": "A", "res": "ASN118", "category": "h_bond", "frequency": 0.65, "count": 13},
-                ],
-                "metal_coordination_freq": 0.0,
-                "d_to_center_A_mean": 7.45,
-                "d_to_center_A_std": 0.34,
-            },
-        },
-    }
-    return render_contact_figure(
-        freq,
-        out_png,
-        title="D143E_S190T — Ensemble Active-Site Substrate Contacts (n = 20 poses)",
+def _generate_active_site_figures(out_dir: Path, pymol_bin: str | None = None) -> list[dict]:
+    """Analyze bundled public holo crystal structures (1AMU, 5XH3) and render active-site figures."""
+    data_dir = REPO_ROOT / "examples" / "data"
+    amu_pdb = data_dir / "1AMU_pheA_holo.pdb"
+    pet_pdb = data_dir / "5XH3_petase_holo.pdb"
+
+    f1 = analyze_ensemble([amu_pdb], substrate_resnames=["PHE"], cofactor_resnames=["AMP"])
+    r1 = render_contact_figure(
+        f1,
+        out_dir / "active_site_1amu_adenylation.png",
+        pose_path=amu_pdb,
+        title="PheA Adenylation Domain (PDB: 1AMU) — AMP + Mg2+ + L-Phe Active Site",
         min_freq=0.5,
+        pymol_bin=pymol_bin,
     )
+
+    f2 = analyze_ensemble([pet_pdb], substrate_resnames=["856"])
+    r2 = render_contact_figure(
+        f2,
+        out_dir / "active_site_5xh3_petase.png",
+        pose_path=pet_pdb,
+        title="IsPETase Hydrolase (PDB: 5XH3) — HEMT Ester Active Site",
+        min_freq=0.5,
+        pymol_bin=pymol_bin,
+    )
+    return [r1, r2]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", type=Path, default=Path("docs/images"))
+    parser.add_argument("--pymol-bin", default=None, help="Optional path to PyMOL executable.")
     args = parser.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -146,10 +138,10 @@ def main() -> int:
         tmp_dir = Path(tmp)
         r1 = _generate_sn2_figure(args.out_dir / "sn2_saturation_geometry.png", tmp_dir)
         r2 = _generate_hydrolase_figure(args.out_dir / "hydrolase_burgi_dunitz_geometry.png", tmp_dir)
-        r3 = _generate_contacts_figure(args.out_dir / "active_site_contacts_example.png")
+    r_sites = _generate_active_site_figures(args.out_dir, pymol_bin=args.pymol_bin)
 
     print("Generated example figures:")
-    for info in (r1, r2, r3):
+    for info in (r1, r2, *r_sites):
         print(" -", info["figure_path"])
     return 0
 

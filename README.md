@@ -22,7 +22,7 @@ pytest -q
 
 > **Dependencies:** Core analysis requires only `numpy` and `PyYAML` (Python ≥ 3.10; no Biopython or MDAnalysis needed).
 > For live GPU co-folding, install in a dedicated PyTorch/CUDA environment (`pip install -e ".[boltz,viz]"`).
-> Optional 3D snapshots use `pymol` on `PATH` (or `PYMOL_BIN`); without PyMOL, 2D figures and CSV/Markdown reports still render automatically.
+> For ray-traced 3D active-site snapshots, `contact-analysis` auto-detects **PyMOL** (`PYMOL_BIN`, `PATH`, `/opt/anaconda3/envs/pymol/bin/pymol`, or `/Applications/PyMOL.app`) and **UCSF ChimeraX** (`CHIMERAX_BIN`, `PATH`, or `/Applications/ChimeraX*.app`); without either, 2D figures and CSV/Markdown reports still render automatically.
 
 ---
 
@@ -61,16 +61,19 @@ Set `mechanism:` in any YAML config (all thresholds and ranking rules are user-o
 
 ## Example Visualizations
 
-Generated offline directly by the toolkit (`python examples/generate_example_figures.py --out-dir docs/images`):
+All example figures are generated directly by the toolkit (`python examples/generate_example_figures.py --out-dir docs/images`). The active-site structures below are rendered directly from the bundled public holo crystal structures in `examples/data/`:
 
-### 1. In-Line SN2 Saturation Scan (`inline_sn2`, target 180°)
+### 1. Adenylation Active Site — PheA + AMP + Mg²⁺ + L-Phe (`PDB: 1AMU`, `inline_sn2`)
+![PheA Adenylation Active Site](docs/images/active_site_1amu_adenylation.png)
+
+### 2. Serine Hydrolase Active Site — *Is*PETase + HEMT Ester (`PDB: 5XH3`, `carbonyl_addition`)
+![IsPETase Active Site](docs/images/active_site_5xh3_petase.png)
+
+### 3. In-Line SN2 Saturation Scan (`inline_sn2`, target 180°)
 ![In-Line SN2 Saturation Geometry](docs/images/sn2_saturation_geometry.png)
 
-### 2. Serine Hydrolase Bürgi–Dunitz Scan (`carbonyl_addition`, 85°–130°, target 107°)
+### 4. Serine Hydrolase Bürgi–Dunitz Scan (`carbonyl_addition`, 85°–130°, target 107°)
 ![Serine Hydrolase Bürgi-Dunitz Geometry](docs/images/hydrolase_burgi_dunitz_geometry.png)
-
-### 3. Ensemble Active-Site Substrate Contacts
-![Ensemble Active-Site Contacts](docs/images/active_site_contacts_example.png)
 
 ---
 

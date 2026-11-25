@@ -98,6 +98,146 @@ def _ligand_pymol_selections(
     return _sel_expr(cof), _sel_expr(metals), _sel_expr(sub)
 
 
+def _find_pymol(pymol_bin: str | None = None) -> str | None:
+    """Locate a PyMOL executable via explicit arg, PYMOL_BIN, PATH, or macOS app bundle."""
+    if pymol_bin:
+        return pymol_bin
+    env = os.environ.get("PYMOL_BIN")
+    if env:
+        return env
+    found = shutil.which("pymol")
+    if found:
+        return found
+    for cand in (
+        "/Applications/PyMOL.app/Contents/MacOS/PyMOL",
+        "/opt/anaconda3/envs/pymol/bin/pymol",
+        "/opt/homebrew/bin/pymol",
+    ):
+        if Path(cand).is_file():
+            return cand
+    return None
+
+
+def _find_chimerax(chimerax_bin: str | None = None) -> str | None:
+    """Locate a UCSF ChimeraX executable via explicit arg, CHIMERAX_BIN, PATH, or macOS app bundle."""
+    if chimerax_bin:
+        return chimerax_bin
+    env = os.environ.get("CHIMERAX_BIN")
+    if env:
+        return env
+    for name in ("chimerax", "ChimeraX"):
+        found = shutil.which(name)
+        if found:
+            return found
+    apps = sorted(Path("/Applications").glob("ChimeraX*.app/Contents/MacOS/ChimeraX"), reverse=True)
+    if apps:
+        return str(apps[0])
+    return None
+
+
+def _render_chimerax_active_site(
+    pose_path: str | Path,
+    residues: Sequence[dict[str, Any]],
+    out_png: Path,
+    chimerax_bin: str | None = None,
+    substrate_chains: Sequence[str] | None = None,
+    cofactor_chains: Sequence[str] | None = None,
+) -> tuple[bool, str]:
+    """Render a headless UCSF ChimeraX active-site snapshot highlighting anchoring residues."""
+    exe = _find_chimerax(chimerax_bin)
+    if not exe:
+        return False, "chimerax binary not found (set --chimerax-bin or CHIMERAX_BIN)"
+
+    from attack_geometry.structure import load_structure
+    from .substrate_contacts import split_ligands
+
+    pose = str(Path(pose_path).expanduser().resolve())
+    try:
+        st = load_structure(pose)
+        cof, metals, sub = split_ligands(
+            st, substrate_chains=substrate_chains, cofactor_chains=cofactor_chains
+        )
+    except (ValueError, OSError) as exc:
+        return False, str(exc)
+
+    def _cx_sel(atoms) -> str:
+        if not atoms:
+            return ""
+        terms = sorted({f"/{a.chain}:{a.resnum}" for a in atoms})
+        return " | ".join(terms)
+
+    sub_sel = _cx_sel(sub)
+    cof_sel = _cx_sel(cof)
+    met_sel = _cx_sel(metals)
+
+    cxc = [
+        f"open {pose}",
+        "set bgColor white",
+        "lighting soft",
+        "graphics silhouettes true",
+        "delete solvent",
+        "hide atoms",
+        "cartoon",
+        "color polymer #d8d8d8",
+        "transparency polymer 82 cartoons",
+    ]
+    focus_parts: list[str] = []
+    if sub_sel:
+        cxc.extend([f"show ({sub_sel})", f"style ({sub_sel}) stick", f"color ({sub_sel}) & C #e66101", f"color ({sub_sel}) byhetero"])
+        focus_parts.append(f"({sub_sel})")
+    if cof_sel:
+        cxc.extend([f"show ({cof_sel})", f"style ({cof_sel}) stick", f"color ({cof_sel}) & C #555555", f"color ({cof_sel}) byhetero"])
+        focus_parts.append(f"({cof_sel})")
+    if met_sel:
+        cxc.extend([f"show ({met_sel})", f"style ({met_sel}) sphere", f"color ({met_sel}) #1b7837"])
+        focus_parts.append(f"({met_sel})")
+
+    for r in residues:
+        rid = _resid(r["res"])
+        if not rid:
+            continue
+        ch = r.get("chain") or "A"
+        sel = f"/{ch}:{rid}"
+        col = CAT_COLOR.get(r["category"], "#666666")
+        cxc.extend(
+            [
+                f"show {sel} & sidechain",
+                f"style {sel} & sidechain stick",
+                f"color {sel} & C {col}",
+                f"color {sel} byhetero",
+                f"label {sel}@CB text \"{r['res']}\" color black bgColor white height 0.9",
+            ]
+        )
+        focus_parts.append(sel)
+
+    if sub_sel and focus_parts:
+        cxc.append(f"hbonds ({sub_sel}) restrict cross reveal true color #666666 radius 0.05")
+    focus = " | ".join(focus_parts) if focus_parts else "ligand"
+    cxc.extend(
+        [
+            f"view ({focus}) pad 0.25",
+            f"save {out_png} width 1400 height 1100 supersample 3",
+            "exit",
+        ]
+    )
+
+    with tempfile.NamedTemporaryFile("w", suffix=".cxc", delete=False) as tmp:
+        tmp.write("\n".join(cxc) + "\n")
+        script_path = tmp.name
+    try:
+        proc = subprocess.run([exe, "--nogui", "--offscreen", script_path], capture_output=True, text=True, timeout=300)
+        if not out_png.is_file():
+            return False, proc.stderr[-500:] or f"chimerax exited with code {proc.returncode}"
+        return True, ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    finally:
+        try:
+            os.remove(script_path)
+        except OSError:
+            pass
+
+
 def _render_pymol_active_site(
     pose_path: str | Path,
     residues: Sequence[dict[str, Any]],
@@ -107,7 +247,7 @@ def _render_pymol_active_site(
     cofactor_chains: Sequence[str] | None = None,
 ) -> tuple[bool, str]:
     """Render a headless PyMOL active-site snapshot highlighting anchoring residues."""
-    exe = pymol_bin or os.environ.get("PYMOL_BIN") or shutil.which("pymol")
+    exe = _find_pymol(pymol_bin)
     if not exe:
         return False, "pymol binary not found (set --pymol-bin or PYMOL_BIN)"
 
@@ -120,19 +260,32 @@ def _render_pymol_active_site(
         "hide everything",
         "bg_color white",
         "remove solvent",
+        "remove (resn WAT+HOH+SOL+TIP3+T3P+NA+CL+K)",
+        "set orthoscopic, 1",
         "set ray_opaque_background, 1",
-        "set cartoon_transparency, 0.88",
+        "set ray_trace_mode, 1",
+        "set ray_shadows, 0",
+        "set antialias, 2",
+        "set cartoon_transparency, 0.85",
+        "set cartoon_side_chain_helper, 1",
+        "set cartoon_fancy_helices, 1",
         "set stick_radius, 0.16",
+        "set valence, 0",
+        "set dash_color, gray40",
+        "set dash_radius, 0.055",
+        "set dash_gap, 0.35",
+        "set dash_length, 0.25",
         f"select cofactor_sel, ({cof_sel})",
         f"select metals_sel, ({metal_sel})",
         f"select substrate_sel, ({sub_sel})",
         "show cartoon, polymer",
-        "color gray90, polymer",
+        "color gray85, polymer",
         "show sticks, substrate_sel",
-        "util.cbao substrate_sel",
+        "color tv_orange, substrate_sel and elem C",
+        "util.cnc substrate_sel",
         "set stick_radius, 0.26, substrate_sel",
         "show sticks, cofactor_sel",
-        "color gray25, cofactor_sel",
+        "color gray35, cofactor_sel and elem C",
         "util.cnc cofactor_sel",
         "show spheres, metals_sel",
         "color forest, metals_sel",
@@ -154,18 +307,25 @@ def _render_pymol_active_site(
                 f"show sticks, {sel_name}",
                 f"set_color c_{idx_r}_{rid}, [{rgb[0]:.3f},{rgb[1]:.3f},{rgb[2]:.3f}]",
                 f"color c_{idx_r}_{rid}, {sel_name} and elem C",
-                f"label (polymer and {chain_clause}resi {rid} and name CA), '{r['res']}'",
+                f"util.cnc {sel_name}",
+                f"distance dd_{idx_r}_{rid}, ({sel_name} and elem N+O+S), (substrate_sel and elem N+O+S), 4.0",
+                f"hide labels, dd_{idx_r}_{rid}",
+                f"label (polymer and {chain_clause}resi {rid} and name CB), '{r['res']}'",
             ]
         )
     site = "substrate_sel or metals_sel" + "".join(f" or {s}" for s in rids)
     pml.extend(
         [
             "set label_color, black",
+            "set label_bg_color, white",
+            "set label_bg_transparency, 0.2",
+            "set label_font_id, 7",
             "set label_size, 18",
+            "set label_position, [0, 0, 2.2]",
             f"select site, ({site})",
             "orient site",
-            "zoom site, 2.0",
-            f"png {out_png}, width=1200, height=1000, dpi=200, ray=1",
+            "zoom site, 2.2",
+            f"png {out_png}, width=1400, height=1100, dpi=220, ray=1",
             "quit",
         ]
     )
@@ -196,10 +356,12 @@ def render_contact_figure(
     min_freq: float = 0.5,
     dock_cutoff_A: float = DOCK_CUT_A,
     pymol_bin: str | None = None,
+    chimerax_bin: str | None = None,
+    renderer: str = "auto",
     substrate_chains: Sequence[str] | None = None,
     cofactor_chains: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """Render paired 3D PyMOL active-site view (when available) + contact-frequency bar chart."""
+    """Render paired 3D PyMOL/ChimeraX active-site view (when available) + contact-frequency bar chart."""
     try:
         import matplotlib
 
@@ -228,17 +390,36 @@ def render_contact_figure(
         dock_col = "#b23024"
 
     pymol_ok = False
+    render_backend = "none"
     pymol_note = "no representative pose supplied"
     struct_png = out.with_name(out.stem + "_3d.png")
     if pose_path is not None:
-        pymol_ok, pymol_note = _render_pymol_active_site(
-            pose_path,
-            residues,
-            struct_png,
-            pymol_bin=pymol_bin,
-            substrate_chains=substrate_chains,
-            cofactor_chains=cofactor_chains,
-        )
+        if renderer in ("auto", "pymol"):
+            pymol_ok, pymol_note = _render_pymol_active_site(
+                pose_path,
+                residues,
+                struct_png,
+                pymol_bin=pymol_bin,
+                substrate_chains=substrate_chains,
+                cofactor_chains=cofactor_chains,
+            )
+            if pymol_ok:
+                render_backend = "pymol"
+        if not pymol_ok and renderer in ("auto", "chimerax"):
+            cx_ok, cx_note = _render_chimerax_active_site(
+                pose_path,
+                residues,
+                struct_png,
+                chimerax_bin=chimerax_bin,
+                substrate_chains=substrate_chains,
+                cofactor_chains=cofactor_chains,
+            )
+            if cx_ok:
+                pymol_ok = True
+                render_backend = "chimerax"
+                pymol_note = ""
+            elif renderer == "chimerax":
+                pymol_note = cx_note
 
     groups: dict[str, list[dict[str, Any]]] = {}
     for r in residues:
@@ -247,11 +428,11 @@ def render_contact_figure(
 
     if pymol_ok:
         fig = plt.figure(figsize=(14, 6.2))
-        outer = fig.add_gridspec(1, 2, width_ratios=[0.85, 1.15], wspace=0.22)
+        outer = fig.add_gridspec(1, 2, width_ratios=[0.95, 1.05], wspace=0.18)
         ax_left = fig.add_subplot(outer[0])
         ax_left.imshow(plt.imread(struct_png))
         ax_left.axis("off")
-        ax_left.set_title("Representative active-site pose", fontsize=11, pad=6)
+        ax_left.set_title("Active-site structure & contacting residues", fontsize=11, fontweight="bold", pad=6)
         right_slot = outer[1]
     else:
         fig = plt.figure(figsize=(9.5, 5.2))
@@ -465,6 +646,8 @@ def write_contact_report(
     pose_path: str | Path | None = None,
     min_freq: float = 0.5,
     pymol_bin: str | None = None,
+    chimerax_bin: str | None = None,
+    renderer: str = "auto",
     render_figure: bool = True,
     substrate_chains: Sequence[str] | None = None,
     cofactor_chains: Sequence[str] | None = None,
@@ -529,6 +712,8 @@ def write_contact_report(
                 title=f"{name} — Active-Site Substrate Contacts",
                 min_freq=min_freq,
                 pymol_bin=pymol_bin,
+                chimerax_bin=chimerax_bin,
+                renderer=renderer,
                 substrate_chains=substrate_chains,
                 cofactor_chains=cofactor_chains,
             )

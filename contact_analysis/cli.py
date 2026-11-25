@@ -61,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_viz.add_argument("--title", default="Active-Site Substrate Contacts", help="Figure title.")
     p_viz.add_argument("--min-freq", type=float, default=0.5, help="Minimum contact frequency to highlight.")
     p_viz.add_argument("--pymol-bin", default=None, help="Optional path to PyMOL executable.")
+    p_viz.add_argument("--chimerax-bin", default=None, help="Optional path to UCSF ChimeraX executable.")
+    p_viz.add_argument("--renderer", choices=("auto", "pymol", "chimerax", "none"), default="auto", help="3D rendering backend (default: auto).")
     p_viz.add_argument("--out", type=Path, required=True, help="Output PNG path.")
 
     # 5. plot-geometry
@@ -83,6 +85,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--substrate-chains", default="", help="Comma-separated substrate chain IDs.")
     p_rep.add_argument("--cofactor-chains", default="", help="Comma-separated cofactor chain IDs.")
     p_rep.add_argument("--pymol-bin", default=None, help="Optional PyMOL executable path.")
+    p_rep.add_argument("--chimerax-bin", default=None, help="Optional UCSF ChimeraX executable path.")
+    p_rep.add_argument("--renderer", choices=("auto", "pymol", "chimerax", "none"), default="auto", help="3D rendering backend (default: auto).")
     p_rep.add_argument("--no-figure", action="store_true", help="Skip figure rendering (tables & Markdown only).")
     p_rep.add_argument("--output-dir", type=Path, required=True, help="Output directory.")
 
@@ -189,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
             title=args.title,
             min_freq=args.min_freq,
             pymol_bin=args.pymol_bin,
+            chimerax_bin=args.chimerax_bin,
+            renderer=args.renderer,
         )
         sys.stdout.write(json.dumps(res, indent=2) + "\n")
         return 0
@@ -223,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
             name=args.name,
             pose_path=rep_pose,
             pymol_bin=args.pymol_bin,
+            chimerax_bin=args.chimerax_bin,
+            renderer=args.renderer,
             render_figure=not args.no_figure,
             substrate_chains=sub_chains,
             cofactor_chains=cof_chains,

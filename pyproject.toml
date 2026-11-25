@@ -8,7 +8,7 @@ version = "0.4.0"
 description = "Standalone saturation mutagenesis, partial diffusion, Boltz-2 co-folding, catalytic attack-geometry, and active-site contact analysis workflows."
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.23",
     "PyYAML>=6.0",

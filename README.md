@@ -1,7 +1,7 @@
 # Enzyme–Substrate Co-Design Workflows
 
 [![CI](https://github.com/Ray16/enzyme-substrate-codesign/actions/workflows/ci.yml/badge.svg)](https://github.com/Ray16/enzyme-substrate-codesign/actions/workflows/ci.yml)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 Standalone, decoupled Python modules extracted from `Enzyme_agent` (`enzyme_design_agent` and `structural_modeling_agent`) for **saturation mutagenesis**, **partial diffusion**, **Boltz-2 co-folding**, **catalytic attack-geometry evaluation**, and **active-site contact analysis & visualization**.
@@ -59,15 +59,16 @@ pip install -e .
 pip install -e ".[viz]"
 ```
 
-Core dependencies are minimal (`numpy` and `PyYAML`, Python ≥ 3.9). No Biopython or MDAnalysis is required for PDB/mmCIF cofold analysis.
+Core dependencies are minimal (`numpy` and `PyYAML`, Python ≥ 3.10). No Biopython or MDAnalysis is required for PDB/mmCIF cofold analysis.
 
 ### Boltz-2 co-folding & PyMOL environment
 
-To run live Boltz-2 co-folding predictions, install this package inside your GPU environment that provides the `boltz` CLI (e.g., an `enzymecage` or dedicated `boltz` conda environment with PyTorch + CUDA):
+To run live Boltz-2 co-folding predictions, create or activate a dedicated Python/conda GPU environment with PyTorch + CUDA and install the package with the `boltz` and `viz` extras:
 
 ```bash
-conda activate enzymecage   # or your Boltz-2 GPU environment
-pip install -e ".[viz]"
+conda create -n boltz python=3.11 -y
+conda activate boltz
+pip install -e ".[boltz,viz]"
 boltz predict --help
 ```
 
